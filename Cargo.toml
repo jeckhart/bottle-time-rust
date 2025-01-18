@@ -24,7 +24,14 @@ experimental = ["esp-idf-svc/experimental"]
 
 [dependencies]
 log = "0.4"
-esp-idf-svc = { version = "0.50", features = ["critical-section", "embassy-time-driver", "embassy-sync"] }
+defmt-rtt = "0.4"
+esp-idf-svc = { version = "0.51", features = ["critical-section", "embassy-time-driver", "embassy-sync"] }
+esp-idf-hal = { version = "0.45", features = ["embassy-sync"] }
+embassy-sync = { version = "0.6", features = ["defmt"]}
+embassy-time-driver = "0.2"
+embassy-executor = { version = "0.7", features = ["defmt"] }
+# Lock this to 0.3 until esp-idf-svc upgrades to embassy-time-driver-0.2 or greater
+embassy-time = { version = "0.4", features = ["defmt", "generic-queue-8"] }
 
 [build-dependencies]
 embuild = "0.33"
