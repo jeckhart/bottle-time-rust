@@ -3,6 +3,9 @@ use esp_idf_svc::log::EspLogger;
 use esp_idf_svc::sys::link_patches;
 use esp_idf_svc::hal::task::block_on;
 
+use esp_backtrace as _;
+use esp_println as _;
+
 fn main() {
     // Necessary for linking patches to the runtime
     link_patches();
@@ -15,8 +18,10 @@ fn main() {
 }
 
 async fn async_main() {
+    defmt::println!("Starting async loop");
+    defmt::info!("Waiting for EspLog to be ready");
     loop {
-        log::info!("Asynchronous task running...");
+        defmt::info!("Asynchronous task running...");
         Timer::after(Duration::from_secs(1)).await;
     }
 }

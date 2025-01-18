@@ -3,8 +3,12 @@ target = "xtensa-esp32s3-espidf"
 
 [target.xtensa-esp32s3-espidf]
 linker = "ldproxy"
-runner = "espflash flash --monitor"
-rustflags = [ "--cfg",  "espidf_time64"]
+runner = "espflash flash --monitor -Ldefmt"
+rustflags = [
+    "--cfg",  "espidf_time64",
+    # --- Support defmt ---
+    "-C", "link-arg=-Tdefmt.x",
+]
 
 [unstable]
 build-std = ["std", "panic_abort"]
