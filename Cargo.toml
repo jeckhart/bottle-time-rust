@@ -35,6 +35,7 @@ embassy-sync = { version = "0.6", features = ["defmt", "std"] }
 
 static_cell = "2"
 anyhow = "1.0"
+chrono = "0.4.39"
 
 
 [build-dependencies]
