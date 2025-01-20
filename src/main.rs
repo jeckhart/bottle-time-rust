@@ -106,41 +106,38 @@ async fn blinky() {
     }
 }
 
+fn button_interrupt_handler() {
+    let system_time = SystemTime::now();
+    // Convert system_time to a timestamp in milliseconds
+    let timestamp_ms = system_time.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis() as i64;
+    if let Some(res) = BUTTON_QUEUE.try_get() {
+        let queue = res.try_borrow();
+        if queue.is_ok() {
+            defmt::trace!("Sending Button pressed event to queue");
+            queue.unwrap().send_back(timestamp_ms, 0).unwrap();
+        } else {
+            defmt::error!("Error sending button pressed event to queue {:?}", queue.err());
+        }
+    } else {
+        defmt::error!("Error getting queue object to register button event");
+    }
+}
+
 #[embassy_executor::task]
 async fn button_task() {
     let button_pin = BUTTON_PIN.get().await;
     defmt::println!("Setting up button task on pin {:?}", button_pin.borrow().pin());
 
     unsafe {
-        button_pin.borrow_mut().subscribe(move || {
-            // Assert FLAG indicating a press button happened
-            // let channel_future = BUTTON_CHANNEL.try_get().with_timeout(Duration::from_millis(1000));
-            // defmt::println!("Button pressed");
-
-            // Fetch the current time without using chrono
-            let system_time = SystemTime::now();
-            // Convert system_time to a timestamp in milliseconds
-            let timestamp_ms = system_time.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis() as i64;
-            if let Some(res) = BUTTON_QUEUE.try_get() {
-                let x = res.try_borrow();
-                if x.is_ok() {
-                    defmt::println!("Button pressed");
-                    x.unwrap().send_back(timestamp_ms, 0).unwrap();
-                } else {
-                    defmt::println!("Button presseda");
-                    defmt::println!("{:?}",x.err());
-                }
-            }
-            // defmt::println!("Button pressed - {:?}", timestamp_ms);
-        }).unwrap();
-        button_pin.borrow_mut().enable_interrupt().unwrap();
+        button_pin.borrow_mut().subscribe(button_interrupt_handler).unwrap();
     }
+    button_pin.borrow_mut().enable_interrupt().unwrap();
 
 
     loop {
         defmt::println!("Looping on button task");
         let queue = BUTTON_QUEUE.get().await;
-        if let Some(msg) = queue.borrow().recv_front(1000) {
+        if let Some(msg) = queue.borrow().recv_front(0) {
             defmt::println!("Button pressed - {:?}", msg);
             button_pin.borrow_mut().enable_interrupt().unwrap();
         } else {
@@ -153,7 +150,6 @@ async fn button_task() {
 #[embassy_executor::task]
 async fn async_main() {
     defmt::println!("Starting async loop");
-    defmt::info!("Waiting for EspLog to be ready");
     loop {
         defmt::info!("Asynchronous task running...");
         Timer::after(Duration::from_secs(1)).await;
