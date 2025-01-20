@@ -12,7 +12,7 @@ use esp_idf_svc::sys::link_patches;
 use esp_idf_hal::prelude::*;
 
 use esp_backtrace as _;
-use esp_idf_hal::gpio::{AnyIOPin, IOPin, Input, InterruptType, Output, PinDriver, Pull};
+use esp_idf_hal::gpio::{AnyIOPin, IOPin, Input, InterruptType, Output, Pin, PinDriver, Pull};
 use esp_idf_hal::task::queue::Queue;
 use esp_println as _;
 
@@ -29,6 +29,27 @@ static BUTTON_QUEUE: OnceLock<&mut RefCell<Queue<i64>>> = OnceLock::new();
 //     defmt::println!("Button pressed - {:?}", timestamp_ms);
 // }
 
+async fn setup_led_pin<'a>(led_pin : AnyIOPin<>, pin_lock: &'a OnceLock<&mut RefCell<PinDriver<'_, AnyIOPin, Output>>>) -> Result<(), ()> {
+    // Initialize the shared LED pin
+    defmt::debug!("Setting up LED Pin on pin {:?}", led_pin.pin());
+    let led_pin_driver = Box::new(RefCell::new(PinDriver::output(led_pin.downgrade()).unwrap()));
+    let _res = pin_lock.init(Box::leak(led_pin_driver));
+    defmt::debug!("Done setting up LED Pin");
+    Ok(())
+}
+
+async fn setup_button_pin<'a>(button_pin : AnyIOPin<>, pin_lock: &'a OnceLock<&mut RefCell<PinDriver<'_, AnyIOPin, Input>>>) -> Result<(), ()> {
+    // Initialize the shared LED pin
+    defmt::println!("Setting up BUTTON Pin on pin {:?}", button_pin.pin());
+    let mut button_driver = PinDriver::input(button_pin.downgrade()).unwrap();
+    button_driver.set_pull(Pull::Up).unwrap();
+    button_driver.set_interrupt_type(InterruptType::AnyEdge).unwrap();
+    let button_pin_driver = Box::new(RefCell::new(button_driver));
+    let _res = pin_lock.init(Box::leak(button_pin_driver));
+    defmt::println!("Done setting up BUTTON Pin");
+    Ok(())
+}
+
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     // Necessary for linking patches to the runtime
@@ -43,22 +64,9 @@ async fn main(spawner: Spawner) {
 
     let peripherals = Peripherals::take().unwrap();
 
-    // Initialize the shared LED pin
-    defmt::println!("Setting up LED Pin");
-    let led_pin = peripherals.pins.gpio2;
-    let led_pin_driver = Box::new(RefCell::new(PinDriver::output(led_pin.downgrade()).unwrap()));
-    let _res = LED_PIN.init(Box::leak(led_pin_driver));
-    defmt::println!("Done setting up LED Pin");
-
-    // Initialize the shared LED pin
-    defmt::println!("Setting up BUTTON Pin");
-    let button_pin = peripherals.pins.gpio4;
-    let mut button_driver = PinDriver::input(button_pin.downgrade()).unwrap();
-    button_driver.set_pull(Pull::Up).unwrap();
-    button_driver.set_interrupt_type(InterruptType::AnyEdge).unwrap();
-    let button_pin_driver = Box::new(RefCell::new(button_driver));
-    let _res = BUTTON_PIN.init(Box::leak(button_pin_driver));
-    defmt::println!("Done setting up BUTTON Pin");
+    // Initialize the shared pins
+    setup_led_pin(peripherals.pins.gpio2.downgrade(), &LED_PIN).await.unwrap();
+    setup_button_pin(peripherals.pins.gpio4.downgrade(), &BUTTON_PIN).await.unwrap();
 
     // Initialize the pubsub channel for button pushes
     {
@@ -68,14 +76,14 @@ async fn main(spawner: Spawner) {
         defmt::println!("Done setting up BUTTON PubSub Channel");
     }
 
-    // Initialize the pubsub channel for button pushes
+    // Initialize the button queue for button pushes
     {
         defmt::println!("Setting up BUTTON Queue");
         let queue = Box::new(RefCell::new(Queue::new(10)));
         let _res = BUTTON_QUEUE.init(Box::leak(queue));
         defmt::println!("Done setting up BUTTON Queue");
     }
-
+    
     // Run the asynchronous main function
     spawner.spawn(blinky()).unwrap();
     spawner.spawn(async_main()).unwrap();
@@ -84,15 +92,14 @@ async fn main(spawner: Spawner) {
 
 #[embassy_executor::task]
 async fn blinky() {
-    {
-        let led_pin = LED_PIN.get().await;
-        defmt::println!("Setting up LED blinky task on pin {:?}", led_pin.borrow().pin());
-    }
+    let led_pin = LED_PIN.get().await;
+    defmt::println!("Setting up LED blinky task on pin {:?}", led_pin.borrow().pin());
+
     loop {
         defmt::println!("Looping on LED blinky task");
-        let led_pin = LED_PIN.get().await;
         led_pin.borrow_mut().set_high().unwrap();
         Timer::after(Duration::from_millis(1000)).await;
+
         let led_pin = LED_PIN.get().await;
         led_pin.borrow_mut().set_low().unwrap();
         Timer::after(Duration::from_millis(1000)).await;
