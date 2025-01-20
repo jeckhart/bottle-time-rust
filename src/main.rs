@@ -1,6 +1,8 @@
 use std::cell::RefCell;
 use embassy_executor::Spawner;
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::once_lock::OnceLock;
+use embassy_sync::pubsub::PubSubChannel;
 use embassy_time::{Duration, Timer};
 use esp_idf_svc::log::EspLogger;
 use esp_idf_svc::sys::link_patches;
@@ -13,6 +15,14 @@ use esp_println as _;
 
 static BUTTON_PIN: OnceLock<&mut RefCell<PinDriver<AnyIOPin, Input>>> = OnceLock::new();
 static LED_PIN: OnceLock<&mut RefCell<PinDriver<AnyIOPin, Output>>> = OnceLock::new();
+static BUTTON_CHANNEL: OnceLock<&mut RefCell<PubSubChannel<CriticalSectionRawMutex, u32, 1, 2, 1>>> = OnceLock::new();
+
+fn gpio_int_callback() {
+    // Assert FLAG indicating a press button happened
+    let channel = BUTTON_CHANNEL.get().unwrap();
+    channel.borrow_mut().publish_immediate(1);
+
+}
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
@@ -38,6 +48,12 @@ async fn main(spawner: Spawner) {
     let button_pin_driver = Box::new(RefCell::new(PinDriver::input(button_pin.downgrade()).unwrap()));
     let _res = BUTTON_PIN.init(Box::leak(button_pin_driver));
     defmt::println!("Done setting up BUTTON Pin");
+
+    // Initialize the pubsub channel for button pushes
+    defmt::println!("Setting up BUTTON PubSub Channel");
+    let button_channel = Box::new(RefCell::new(PubSubChannel::<CriticalSectionRawMutex, u32, 1, 2, 1>::new()));
+    let _res = BUTTON_CHANNEL.init(Box::leak(button_channel));
+    defmt::println!("Done setting up BUTTON PubSub Channel");
 
     // Run the asynchronous main function
     spawner.spawn(blinky()).unwrap();
