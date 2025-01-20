@@ -1,6 +1,5 @@
 use std::cell::RefCell;
-use std::time::SystemTime;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeDelta, Utc};
 use embassy_executor::Spawner;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::once_lock::OnceLock;
@@ -13,21 +12,11 @@ use esp_idf_hal::prelude::*;
 
 use esp_backtrace as _;
 use esp_idf_hal::gpio::{AnyIOPin, IOPin, Input, InterruptType, Output, Pin, PinDriver, Pull};
-use esp_idf_hal::task::queue::Queue;
 use esp_println as _;
 
 static BUTTON_PIN: OnceLock<&mut RefCell<PinDriver<AnyIOPin, Input>>> = OnceLock::new();
 static LED_PIN: OnceLock<&mut RefCell<PinDriver<AnyIOPin, Output>>> = OnceLock::new();
-static BUTTON_CHANNEL: OnceLock<&mut RefCell<PubSubChannel<CriticalSectionRawMutex, u32, 1, 2, 1>>> = OnceLock::new();
-static BUTTON_QUEUE: OnceLock<&mut RefCell<Queue<i64>>> = OnceLock::new();
-
-// fn gpio_int_callback() {
-//     // Assert FLAG indicating a press button happened
-//     let channel_future = BUTTON_CHANNEL.get().with_timeout(Duration::from_millis(1000));
-//     let timestamp_ms = chrono::Local::now().timestamp_millis();
-//     let res = BUTTON_QUEUE.send_back(timestamp_ms, 0).unwrap();
-//     defmt::println!("Button pressed - {:?}", timestamp_ms);
-// }
+static BUTTON_CHANNEL: PubSubChannel<CriticalSectionRawMutex, i64, 1, 2, 1> = PubSubChannel::new();
 
 async fn setup_led_pin<'a>(led_pin : AnyIOPin<>, pin_lock: &'a OnceLock<&mut RefCell<PinDriver<'_, AnyIOPin, Output>>>) -> Result<(), ()> {
     // Initialize the shared LED pin
@@ -68,22 +57,6 @@ async fn main(spawner: Spawner) {
     setup_led_pin(peripherals.pins.gpio2.downgrade(), &LED_PIN).await.unwrap();
     setup_button_pin(peripherals.pins.gpio4.downgrade(), &BUTTON_PIN).await.unwrap();
 
-    // Initialize the pubsub channel for button pushes
-    {
-        defmt::println!("Setting up BUTTON PubSub Channel");
-        let button_channel = Box::new(RefCell::new(PubSubChannel::<CriticalSectionRawMutex, u32, 1, 2, 1>::new()));
-        let _res = BUTTON_CHANNEL.init(Box::leak(button_channel));
-        defmt::println!("Done setting up BUTTON PubSub Channel");
-    }
-
-    // Initialize the button queue for button pushes
-    {
-        defmt::println!("Setting up BUTTON Queue");
-        let queue = Box::new(RefCell::new(Queue::new(10)));
-        let _res = BUTTON_QUEUE.init(Box::leak(queue));
-        defmt::println!("Done setting up BUTTON Queue");
-    }
-    
     // Run the asynchronous main function
     spawner.spawn(blinky()).unwrap();
     spawner.spawn(async_main()).unwrap();
@@ -95,31 +68,30 @@ async fn blinky() {
     let led_pin = LED_PIN.get().await;
     defmt::println!("Setting up LED blinky task on pin {:?}", led_pin.borrow().pin());
 
+    let mut subscriber = BUTTON_CHANNEL.dyn_subscriber().unwrap();
+
     loop {
-        defmt::println!("Looping on LED blinky task");
-        led_pin.borrow_mut().set_high().unwrap();
-        Timer::after(Duration::from_millis(1000)).await;
+        if let Some(msg) = subscriber.try_next_message() {
+            defmt::info!("Signal to LED task from BUTTON task found {:?}", msg.clone());
 
-        let led_pin = LED_PIN.get().await;
-        led_pin.borrow_mut().set_low().unwrap();
-        Timer::after(Duration::from_millis(1000)).await;
-    }
-}
-
-fn button_interrupt_handler() {
-    let system_time = SystemTime::now();
-    // Convert system_time to a timestamp in milliseconds
-    let timestamp_ms = system_time.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis() as i64;
-    if let Some(res) = BUTTON_QUEUE.try_get() {
-        let queue = res.try_borrow();
-        if queue.is_ok() {
-            defmt::trace!("Sending Button pressed event to queue");
-            queue.unwrap().send_back(timestamp_ms, 0).unwrap();
+            // For loop that runs for 5 seconds and blinks the led every 100 ms
+            let start_time = chrono::Local::now();
+            while chrono::Local::now() - start_time < TimeDelta::seconds(5) {
+                led_pin.borrow_mut().set_high().unwrap();
+                Timer::after(Duration::from_millis(100)).await;
+                led_pin.borrow_mut().set_low().unwrap();
+                Timer::after(Duration::from_millis(100)).await;
+            }
+            defmt::info!("Done signalling LED from BUTTON");
         } else {
-            defmt::error!("Error sending button pressed event to queue {:?}", queue.err());
+            defmt::println!("Looping on LED blinky task");
+            led_pin.borrow_mut().set_high().unwrap();
+            Timer::after(Duration::from_millis(1000)).await;
+
+            let led_pin = LED_PIN.get().await;
+            led_pin.borrow_mut().set_low().unwrap();
+            Timer::after(Duration::from_millis(1000)).await;
         }
-    } else {
-        defmt::error!("Error getting queue object to register button event");
     }
 }
 
@@ -127,22 +99,14 @@ fn button_interrupt_handler() {
 async fn button_task() {
     let button_pin = BUTTON_PIN.get().await;
     defmt::println!("Setting up button task on pin {:?}", button_pin.borrow().pin());
-
-    unsafe {
-        button_pin.borrow_mut().subscribe(button_interrupt_handler).unwrap();
-    }
-    button_pin.borrow_mut().enable_interrupt().unwrap();
-
+    let publisher = BUTTON_CHANNEL.publisher().unwrap();
 
     loop {
         defmt::println!("Looping on button task");
-        let queue = BUTTON_QUEUE.get().await;
-        if let Some(msg) = queue.borrow().recv_front(0) {
-            defmt::println!("Button pressed - {:?}", msg);
-            button_pin.borrow_mut().enable_interrupt().unwrap();
-        } else {
-            defmt::println!("No signal found");
-        }
+        button_pin.borrow_mut().wait_for_rising_edge().await.unwrap();
+        let current_time = chrono::Local::now();
+        defmt::println!("Button pressed at {:?}", current_time.to_rfc3339().as_str());
+        publisher.publish_immediate(current_time.timestamp_micros());
         Timer::after(Duration::from_millis(1000)).await;
     }
 }
