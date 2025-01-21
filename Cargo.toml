@@ -25,15 +25,18 @@ experimental = ["esp-idf-svc/experimental"]
 [dependencies]
 log = "0.4"
 defmt = { version = "0.3", features = ["encoding-rzcobs"] }
-esp-idf-svc = { version = "0.51", features = ["critical-section", "embassy-time-driver", "embassy-sync"] }
-esp-idf-hal = { version = "0.45", features = ["embassy-sync"] }
+esp-idf-svc = { version = "0.51", features = ["embassy-time-driver", "embassy-sync"] }
+esp-idf-hal = { version = "0.45", features = ["embassy-sync", ] }
 esp-println = { version = "0.13", features = ["defmt-espflash", "esp32s3", "log", "colors"] }
 esp-backtrace = { version = "0.15.0", features = ["defmt", "esp32s3", "colors"] }
-embassy-sync = { version = "0.6", features = ["defmt"]}
-embassy-time-driver = "0.2"
-embassy-executor = { version = "0.7", features = ["defmt"] }
-# Lock this to 0.3 until esp-idf-svc upgrades to embassy-time-driver-0.2 or greater
+embassy-executor = { version = "0.7", features = ["arch-std", "executor-thread", "defmt"] }
 embassy-time = { version = "0.4", features = ["defmt", "generic-queue-8"] }
+embassy-sync = { version = "0.6", features = ["defmt", "std"] }
+
+static_cell = "2"
+anyhow = "1.0"
+chrono = "0.4.39"
+
 
 [build-dependencies]
 embuild = "0.33"

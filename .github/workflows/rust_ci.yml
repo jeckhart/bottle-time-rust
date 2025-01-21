@@ -34,6 +34,15 @@ jobs:
           default: true
           buildtargets: esp32s3
           ldproxy: true
+      - name: Install Xtensa toolchain
+        shell: bash
+        run: |
+          source "$HOME/.cargo/env"
+          "$HOME/.cargo/bin/espup" install -l debug -n nightly -a esp-nightly --export-file $HOME/exports --targets esp32s3
+          source "$HOME/exports"
+          echo "$PATH" >> "$GITHUB_PATH"
+          echo "LIBCLANG_PATH=${LIBCLANG_PATH}" >> "$GITHUB_ENV"
+          rustup default esp-nightly || true
       - name: Enable caching
         uses: Swatinem/rust-cache@v2
       - name: Run command
