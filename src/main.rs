@@ -18,7 +18,7 @@ static BUTTON_PIN: OnceLock<&mut RefCell<PinDriver<AnyIOPin, Input>>> = OnceLock
 static LED_PIN: OnceLock<&mut RefCell<PinDriver<AnyIOPin, Output>>> = OnceLock::new();
 static BUTTON_CHANNEL: PubSubChannel<CriticalSectionRawMutex, i64, 1, 2, 1> = PubSubChannel::new();
 
-async fn setup_led_pin<'a>(led_pin : AnyIOPin<>, pin_lock: &'a OnceLock<&mut RefCell<PinDriver<'_, AnyIOPin, Output>>>) -> Result<(), ()> {
+async fn setup_led_pin(led_pin : AnyIOPin<>, pin_lock: & OnceLock<&mut RefCell<PinDriver<'_, AnyIOPin, Output>>>) -> Result<(), ()> {
     // Initialize the shared LED pin
     defmt::debug!("Setting up LED Pin on pin {:?}", led_pin.pin());
     let led_pin_driver = Box::new(RefCell::new(PinDriver::output(led_pin.downgrade()).unwrap()));
@@ -27,7 +27,7 @@ async fn setup_led_pin<'a>(led_pin : AnyIOPin<>, pin_lock: &'a OnceLock<&mut Ref
     Ok(())
 }
 
-async fn setup_button_pin<'a>(button_pin : AnyIOPin<>, pin_lock: &'a OnceLock<&mut RefCell<PinDriver<'_, AnyIOPin, Input>>>) -> Result<(), ()> {
+async fn setup_button_pin(button_pin : AnyIOPin<>, pin_lock: &OnceLock<&mut RefCell<PinDriver<'_, AnyIOPin, Input>>>) -> Result<(), ()> {
     // Initialize the shared LED pin
     defmt::println!("Setting up BUTTON Pin on pin {:?}", button_pin.pin());
     let mut button_driver = PinDriver::input(button_pin.downgrade()).unwrap();
@@ -96,6 +96,7 @@ async fn blinky() {
 }
 
 #[embassy_executor::task]
+#[allow(clippy::await_holding_refcell_ref)]
 async fn button_task() {
     let button_pin = BUTTON_PIN.get().await;
     defmt::println!("Setting up button task on pin {:?}", button_pin.borrow().pin());
@@ -103,7 +104,13 @@ async fn button_task() {
 
     loop {
         defmt::println!("Looping on button task");
-        button_pin.borrow_mut().wait_for_rising_edge().await.unwrap();
+
+        // This is the only place we borrow the button pin, so this should be safe to ignore the clippy warning here.
+        {
+            let mut button = button_pin.borrow_mut();
+            button.wait_for_rising_edge().await.unwrap();
+        }
+
         let current_time = chrono::Local::now();
         defmt::println!("Button pressed at {:?}", current_time.to_rfc3339().as_str());
         publisher.publish_immediate(current_time.timestamp_micros());
