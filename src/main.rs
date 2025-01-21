@@ -4,11 +4,12 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::once_lock::OnceLock;
 use embassy_sync::pubsub::PubSubChannel;
 use embassy_time::{Duration, Timer};
+use esp_idf_hal::prelude::*;
 use esp_idf_svc::log::EspLogger;
 use esp_idf_svc::sys::link_patches;
 use std::cell::RefCell;
-
-use esp_idf_hal::prelude::*;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering::Relaxed;
 
 use esp_backtrace as _;
 use esp_idf_hal::gpio::{AnyIOPin, IOPin, Input, InterruptType, Output, Pin, PinDriver, Pull};
@@ -17,6 +18,7 @@ use esp_println as _;
 static BUTTON_PIN: OnceLock<&mut RefCell<PinDriver<AnyIOPin, Input>>> = OnceLock::new();
 static LED_PIN: OnceLock<&mut RefCell<PinDriver<AnyIOPin, Output>>> = OnceLock::new();
 static BUTTON_CHANNEL: PubSubChannel<CriticalSectionRawMutex, i64, 1, 2, 1> = PubSubChannel::new();
+static RESTART_LED_SEQUENCE: AtomicBool = AtomicBool::new(false);
 
 async fn setup_led_pin(
     led_pin: AnyIOPin,
@@ -80,6 +82,22 @@ async fn main(spawner: Spawner) {
     spawner.spawn(button_task()).unwrap();
 }
 
+async fn wait_for_duration_with_interrupt(
+    duration: Duration,
+    interrupt: &AtomicBool,
+    poll_time: Option<Duration>,
+) -> bool {
+    let poll_time = poll_time.unwrap_or(Duration::from_millis(100));
+
+    let start_time = chrono::Local::now();
+    // Convert Duration to TimeDelta
+    let td = TimeDelta::milliseconds(duration.as_millis() as i64);
+    while chrono::Local::now() - start_time < td && !interrupt.load(Relaxed) {
+        Timer::after(poll_time).await;
+    }
+    !interrupt.load(Relaxed)
+}
+
 #[embassy_executor::task]
 async fn blinky() {
     let led_pin = LED_PIN.get().await;
@@ -91,6 +109,7 @@ async fn blinky() {
     let mut subscriber = BUTTON_CHANNEL.dyn_subscriber().unwrap();
 
     loop {
+        RESTART_LED_SEQUENCE.store(false, Relaxed);
         if let Some(msg) = subscriber.try_next_message() {
             defmt::info!(
                 "Signal to LED task from BUTTON task found {:?}",
@@ -99,21 +118,39 @@ async fn blinky() {
 
             // For loop that runs for 5 seconds and blinks the led every 100 ms
             let start_time = chrono::Local::now();
-            while chrono::Local::now() - start_time < TimeDelta::seconds(5) {
-                led_pin.borrow_mut().set_high().unwrap();
-                Timer::after(Duration::from_millis(100)).await;
-                led_pin.borrow_mut().set_low().unwrap();
+            while chrono::Local::now() - start_time < TimeDelta::seconds(5)
+                && !RESTART_LED_SEQUENCE.load(Relaxed)
+            {
+                if led_pin.borrow_mut().is_set_high() {
+                    led_pin.borrow_mut().set_low().unwrap();
+                } else {
+                    led_pin.borrow_mut().set_high().unwrap();
+                }
                 Timer::after(Duration::from_millis(100)).await;
             }
             defmt::info!("Done signalling LED from BUTTON");
         } else {
             defmt::println!("Looping on LED blinky task");
             led_pin.borrow_mut().set_high().unwrap();
-            Timer::after(Duration::from_millis(1000)).await;
-
-            let led_pin = LED_PIN.get().await;
+            if !wait_for_duration_with_interrupt(
+                Duration::from_secs(1),
+                &RESTART_LED_SEQUENCE,
+                Some(Duration::from_millis(100)),
+            )
+            .await
+            {
+                continue;
+            }
             led_pin.borrow_mut().set_low().unwrap();
-            Timer::after(Duration::from_millis(1000)).await;
+            if !wait_for_duration_with_interrupt(
+                Duration::from_secs(1),
+                &RESTART_LED_SEQUENCE,
+                Some(Duration::from_millis(100)),
+            )
+            .await
+            {
+                continue;
+            }
         }
     }
 }
@@ -140,6 +177,7 @@ async fn button_task() {
         let current_time = chrono::Local::now();
         defmt::println!("Button pressed at {:?}", current_time.to_rfc3339().as_str());
         publisher.publish_immediate(current_time.timestamp_micros());
+        RESTART_LED_SEQUENCE.store(true, std::sync::atomic::Ordering::Relaxed);
         Timer::after(Duration::from_millis(1000)).await;
     }
 }
