@@ -1,4 +1,3 @@
-use std::cell::RefCell;
 use chrono::{DateTime, TimeDelta, Utc};
 use embassy_executor::Spawner;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
@@ -7,6 +6,7 @@ use embassy_sync::pubsub::PubSubChannel;
 use embassy_time::{Duration, Timer};
 use esp_idf_svc::log::EspLogger;
 use esp_idf_svc::sys::link_patches;
+use std::cell::RefCell;
 
 use esp_idf_hal::prelude::*;
 
@@ -18,21 +18,31 @@ static BUTTON_PIN: OnceLock<&mut RefCell<PinDriver<AnyIOPin, Input>>> = OnceLock
 static LED_PIN: OnceLock<&mut RefCell<PinDriver<AnyIOPin, Output>>> = OnceLock::new();
 static BUTTON_CHANNEL: PubSubChannel<CriticalSectionRawMutex, i64, 1, 2, 1> = PubSubChannel::new();
 
-async fn setup_led_pin(led_pin : AnyIOPin<>, pin_lock: & OnceLock<&mut RefCell<PinDriver<'_, AnyIOPin, Output>>>) -> Result<(), ()> {
+async fn setup_led_pin(
+    led_pin: AnyIOPin,
+    pin_lock: &OnceLock<&mut RefCell<PinDriver<'_, AnyIOPin, Output>>>,
+) -> Result<(), ()> {
     // Initialize the shared LED pin
     defmt::debug!("Setting up LED Pin on pin {:?}", led_pin.pin());
-    let led_pin_driver = Box::new(RefCell::new(PinDriver::output(led_pin.downgrade()).unwrap()));
+    let led_pin_driver = Box::new(RefCell::new(
+        PinDriver::output(led_pin.downgrade()).unwrap(),
+    ));
     let _res = pin_lock.init(Box::leak(led_pin_driver));
     defmt::debug!("Done setting up LED Pin");
     Ok(())
 }
 
-async fn setup_button_pin(button_pin : AnyIOPin<>, pin_lock: &OnceLock<&mut RefCell<PinDriver<'_, AnyIOPin, Input>>>) -> Result<(), ()> {
+async fn setup_button_pin(
+    button_pin: AnyIOPin,
+    pin_lock: &OnceLock<&mut RefCell<PinDriver<'_, AnyIOPin, Input>>>,
+) -> Result<(), ()> {
     // Initialize the shared LED pin
     defmt::println!("Setting up BUTTON Pin on pin {:?}", button_pin.pin());
     let mut button_driver = PinDriver::input(button_pin.downgrade()).unwrap();
     button_driver.set_pull(Pull::Up).unwrap();
-    button_driver.set_interrupt_type(InterruptType::AnyEdge).unwrap();
+    button_driver
+        .set_interrupt_type(InterruptType::AnyEdge)
+        .unwrap();
     let button_pin_driver = Box::new(RefCell::new(button_driver));
     let _res = pin_lock.init(Box::leak(button_pin_driver));
     defmt::println!("Done setting up BUTTON Pin");
@@ -49,13 +59,20 @@ async fn main(spawner: Spawner) {
 
     let current_time = chrono::Local::now();
     let datetime: DateTime<Utc> = current_time.into();
-    defmt::println!("Starting async main - current time {:?}", datetime.to_rfc3339().as_str());
+    defmt::println!(
+        "Starting async main - current time {:?}",
+        datetime.to_rfc3339().as_str()
+    );
 
     let peripherals = Peripherals::take().unwrap();
 
     // Initialize the shared pins
-    setup_led_pin(peripherals.pins.gpio2.downgrade(), &LED_PIN).await.unwrap();
-    setup_button_pin(peripherals.pins.gpio4.downgrade(), &BUTTON_PIN).await.unwrap();
+    setup_led_pin(peripherals.pins.gpio2.downgrade(), &LED_PIN)
+        .await
+        .unwrap();
+    setup_button_pin(peripherals.pins.gpio4.downgrade(), &BUTTON_PIN)
+        .await
+        .unwrap();
 
     // Run the asynchronous main function
     spawner.spawn(blinky()).unwrap();
@@ -66,13 +83,19 @@ async fn main(spawner: Spawner) {
 #[embassy_executor::task]
 async fn blinky() {
     let led_pin = LED_PIN.get().await;
-    defmt::println!("Setting up LED blinky task on pin {:?}", led_pin.borrow().pin());
+    defmt::println!(
+        "Setting up LED blinky task on pin {:?}",
+        led_pin.borrow().pin()
+    );
 
     let mut subscriber = BUTTON_CHANNEL.dyn_subscriber().unwrap();
 
     loop {
         if let Some(msg) = subscriber.try_next_message() {
-            defmt::info!("Signal to LED task from BUTTON task found {:?}", msg.clone());
+            defmt::info!(
+                "Signal to LED task from BUTTON task found {:?}",
+                msg.clone()
+            );
 
             // For loop that runs for 5 seconds and blinks the led every 100 ms
             let start_time = chrono::Local::now();
@@ -99,7 +122,10 @@ async fn blinky() {
 #[allow(clippy::await_holding_refcell_ref)]
 async fn button_task() {
     let button_pin = BUTTON_PIN.get().await;
-    defmt::println!("Setting up button task on pin {:?}", button_pin.borrow().pin());
+    defmt::println!(
+        "Setting up button task on pin {:?}",
+        button_pin.borrow().pin()
+    );
     let publisher = BUTTON_CHANNEL.publisher().unwrap();
 
     loop {
