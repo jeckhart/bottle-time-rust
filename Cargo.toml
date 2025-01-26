@@ -15,7 +15,7 @@ opt-level = "s"
 
 [profile.dev]
 debug = true    # Symbols are nice and they don't increase the size on Flash
-opt-level = "z"
+opt-level = "s"
 
 [features]
 default = []
@@ -25,15 +25,38 @@ experimental = ["esp-idf-svc/experimental"]
 [dependencies]
 log = "0.4"
 defmt = { version = "0.3", features = ["encoding-rzcobs"] }
-esp-idf-svc = { version = "0.51", features = ["embassy-time-driver", "embassy-sync"] }
-esp-idf-hal = { version = "0.45", features = ["embassy-sync", ] }
-esp-println = { version = "0.13", features = ["defmt-espflash", "esp32s3", "log", "colors"] }
-esp-backtrace = { version = "0.15.0", features = ["defmt", "esp32s3", "colors"] }
-embassy-executor = { version = "0.7", features = ["arch-std", "executor-thread", "defmt"] }
+embassy-embedded-hal = { version = "0.3", features = ["defmt"]}
+embassy-executor = { version = "0.7", features = ["defmt", "arch-std", "executor-thread"] }
+embassy-sync = { version = "0.6", features = ["defmt"] }
 embassy-time = { version = "0.4", features = ["defmt", "generic-queue-8"] }
-embassy-sync = { version = "0.6", features = ["defmt", "std"] }
 
-static_cell = "2"
+embedded-svc = { version = "0.28", default-features = false, features = [
+    "defmt",
+    "std",
+    "use_serde",
+    "use_strum",
+    "use_numenum",]}
+
+esp-idf-svc = { version = "0.51", features = ["embassy-time-driver", "embassy-sync"] }
+esp-idf-hal = { version = "0.45", features = ["embassy-sync"] }
+esp-println = { version = "0.13", features = ["defmt-espflash", "esp32s3", "log", "colors"] }
+esp-backtrace = { version = "0.15.0", features = ["defmt", "esp32s3", "colors", "exception-handler"] }
+
+static_cell = { version = "2.1.0", features = ["nightly"] }
+
+smoltcp = { version = "0.12", default-features = false, features = [
+    "medium-ethernet",
+    "proto-dhcpv4",
+    "proto-dns",
+    "proto-ipv4",
+    "socket-dhcpv4",
+    "socket-icmp",
+    "socket-raw",
+    "socket-tcp",
+    "socket-udp",
+    "dns-max-server-count-4",
+] }
+
 anyhow = "1.0"
 chrono = "0.4.39"
 
