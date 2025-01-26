@@ -1,7 +1,6 @@
-
 mod net;
 
-use chrono::{DateTime, TimeDelta, Utc};
+use chrono::{DateTime, TimeDelta, TimeZone, Utc};
 use embassy_executor::Spawner;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::once_lock::OnceLock;
@@ -19,6 +18,8 @@ use esp_idf_hal::gpio::{AnyIOPin, IOPin, Input, InterruptType, Output, Pin, PinD
 use esp_idf_hal::modem::Modem;
 use esp_idf_svc::eventloop::{EspEventLoop, EspSystemEventLoop, System};
 use esp_idf_svc::nvs::{EspDefaultNvsPartition, EspNvsPartition, NvsDefault};
+use esp_idf_svc::sntp;
+use esp_idf_svc::sntp::{EspSntp, SntpConf};
 use esp_idf_svc::timer::{EspTaskTimerService, EspTimerService, Task};
 use esp_idf_svc::wifi::{AsyncWifi, EspWifi};
 use esp_println as _;
@@ -29,6 +30,7 @@ static BUTTON_CHANNEL: PubSubChannel<CriticalSectionRawMutex, i64, 1, 2, 1> = Pu
 static RESTART_LED_SEQUENCE: AtomicBool = AtomicBool::new(false);
 static WIFI_CONNECTED: AtomicBool = AtomicBool::new(false);
 static WIFI: OnceLock<&mut RefCell<AsyncWifi<EspWifi>>> = OnceLock::new();
+static SNTP: OnceLock<&mut RefCell<EspSntp>> = OnceLock::new();
 
 async fn setup_led_pin(
     led_pin: AnyIOPin,
@@ -84,6 +86,37 @@ async fn setup_wifi(
     Ok(())
 }
 
+async fn setup_sntp<F>(cb: F) -> Result<(), ()>
+where
+    F: FnMut(std::time::Duration) + Send + 'static,
+{
+    // Initialize the shared LED pin
+    defmt::debug!("Setting up SNTP");
+    let sntp_conf = SntpConf {
+        ..Default::default()
+    };
+
+    let sntp = unsafe {
+        Box::new(RefCell::new(
+            sntp::EspSntp::new_nonstatic_with_callback(&sntp_conf, cb).unwrap(),
+        ))
+    };
+    let _res = SNTP.init(Box::leak(sntp));
+    defmt::debug!("Done setting up SNTP");
+    Ok(())
+}
+
+fn sntp_cb(duration: std::time::Duration) {
+    // The duration "looks like" a seconds since the epoch timestamp, so lets convert and see
+    let tz = chrono::FixedOffset::west_opt(3600 * 5).unwrap();
+    let utc_tz = DateTime::from_timestamp(duration.as_secs() as i64, 0).unwrap();
+    let timestamp = tz.from_utc_datetime(&utc_tz.naive_utc());
+    defmt::info!(
+        "SNTP callback called with duration {:?}",
+        timestamp.to_string().as_str()
+    );
+}
+
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     // Necessary for linking patches to the runtime
@@ -122,6 +155,7 @@ async fn main(spawner: Spawner) {
     spawner
         .spawn(net::connect_wifi(&WIFI, &WIFI_CONNECTED))
         .unwrap();
+    setup_sntp(sntp_cb).await.unwrap();
 }
 
 async fn wait_for_duration_with_interrupt(
