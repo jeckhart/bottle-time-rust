@@ -283,6 +283,8 @@ async fn async_main() {
 #[embassy_executor::task]
 async fn read_kasa_dev(addr: SocketAddr) {
     let _mounted_eventfs = esp_idf_svc::io::vfs::MountedEventfs::mount(5).unwrap();
+    let mut last_response: Option<KasaPowerDetails> = Option::None;
+
     loop {
         defmt::info!("Connecting to Kasa Device...");
 
@@ -308,7 +310,20 @@ async fn read_kasa_dev(addr: SocketAddr) {
             }
         };
 
-        defmt::info!("Received message: {:?}", result);
+        match last_response.as_mut() {
+            Some(last) => {
+                if last != &result {
+                    defmt::debug!("Power state changed: {:?}", result);
+                    *last = result;
+                } else {
+                    defmt::debug!("No change in power state");
+                }
+            }
+            None => {
+                defmt::debug!("Initial power state: {:?}", result);
+                last_response = Some(result);
+            }
+        }
 
         Timer::after(Duration::from_millis(500)).await;
     }
