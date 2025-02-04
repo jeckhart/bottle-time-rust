@@ -3,7 +3,7 @@ target = "xtensa-esp32s3-espidf"
 
 [target.xtensa-esp32s3-espidf]
 linker = "ldproxy"
-runner = "espflash flash --monitor -Ldefmt"
+runner = "espflash flash --monitor -Ldefmt --partition-table ./partitions_singleapp_large.csv"
 rustflags = [
     "--cfg",  "espidf_time64",
     # --- Support defmt ---
@@ -22,3 +22,4 @@ ESP_IDF_PATH_ISSUES = "warn"
 RUST_BACKTRACE="1"
 WIFI_SSID = "YOUR_SSID_HERE"
 WIFI_PASSWORD = "YOUR_PASSWORD_HERE"
+KASA_DEVICE_ADDR = "1.1.1.1:9999"

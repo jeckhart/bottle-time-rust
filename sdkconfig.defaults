@@ -10,3 +10,14 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=8000
 #CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=n
 
 ESP_WIFI_DEBUG_PRINT=y
+
+#CONFIG_PARTITION_TABLE_SINGLE_APP=n
+#CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
+CONFIG_PARTITION_TABLE_FILENAME="partitions_singleapp_large.csv"
+
+#CONFIG_PARTITION_TABLE_CUSTOM=y
+# CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_singleapp_large.csv"
+
+# We were getting stack overflow events when connecting to a server, so increase
+# the stack size to make enough room for the tcp stack
+CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT=8192

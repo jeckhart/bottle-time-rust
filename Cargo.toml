@@ -11,7 +11,11 @@ name = "bottle-time-rust"
 harness = false # do not use the built in cargo test harness -> resolve rust-analyzer errors
 
 [profile.release]
-opt-level = "s"
+opt-level = "z"  # Optimize for size
+lto = true       # Enable Link Time Optimization
+codegen-units = 1  # Reduce parallel code generation units
+#strip = true     # Automatically strip symbols from the binary
+panic = "abort"  # Remove panic unwinding code
 
 [profile.dev]
 debug = true    # Symbols are nice and they don't increase the size on Flash
@@ -23,43 +27,34 @@ default = []
 experimental = ["esp-idf-svc/experimental"]
 
 [dependencies]
-log = "0.4"
 defmt = { version = "0.3", features = ["encoding-rzcobs"] }
 embassy-embedded-hal = { version = "0.3", features = ["defmt"]}
 embassy-executor = { version = "0.7", features = ["defmt", "arch-std", "executor-thread"] }
 embassy-sync = { version = "0.6", features = ["defmt"] }
 embassy-time = { version = "0.4", features = ["defmt", "generic-queue-8"] }
 
-embedded-svc = { version = "0.28", default-features = false, features = [
-    "defmt",
-    "std",
-    "use_serde",
-    "use_strum",
-    "use_numenum",]}
-
 esp-idf-svc = { version = "0.51", features = ["embassy-time-driver", "embassy-sync"] }
 esp-idf-hal = { version = "0.45", features = ["embassy-sync"] }
 esp-println = { version = "0.13", features = ["defmt-espflash", "esp32s3", "log", "colors"] }
 esp-backtrace = { version = "0.15.0", features = ["defmt", "esp32s3", "colors", "exception-handler"] }
 
-static_cell = { version = "2.1.0", features = ["nightly"] }
+chrono = { version = "0.4.39", default-features = false, features = ["alloc", "clock", ] }
 
-smoltcp = { version = "0.12", default-features = false, features = [
-    "medium-ethernet",
-    "proto-dhcpv4",
-    "proto-dns",
-    "proto-ipv4",
-    "socket-dhcpv4",
-    "socket-icmp",
-    "socket-raw",
-    "socket-tcp",
-    "socket-udp",
-    "dns-max-server-count-4",
-] }
-
-anyhow = "1.0"
-chrono = "0.4.39"
-
+async-io = "2"
+#async-io-typed = "3"
+futures-lite = { version = "2.6.0", default-features = false, features = ["alloc"] }
+serde = { version = "1", default-features = false, features = ["derive"] }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
+tplink-shome-protocol = "0.1.2"
 
 [build-dependencies]
 embuild = "0.33"
+
+[package.metadata.esp-idf-sys]
+# esp_idf_tools_install_dir = "global"
+# esp_idf_sdkconfig = "sdkconfig"
+esp_idf_sdkconfig_defaults = ["sdkconfig.defaults", "sdkconfig.defaults.ble"]
+# native builder only
+# esp_idf_components = ["pthread"]
+partition_table = "./partitions_singleapp_large.csv"
+# esp_idf_extra_components = ["esp32s3"]
