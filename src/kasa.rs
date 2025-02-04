@@ -69,7 +69,7 @@ struct KasaRealtimeResponse {
     pub total_wh: Option<u64>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, PartialEq)]
 pub(crate) struct KasaPowerDetails {
     pub alias: String,
     pub device_id: String,
