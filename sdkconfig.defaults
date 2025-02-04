@@ -10,3 +10,7 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=8000
 #CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=n
 
 ESP_WIFI_DEBUG_PRINT=y
+
+# We were getting stack overflow events when connecting to a server, so increase
+# the stack size to make enough room for the tcp stack
+CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT=8192

@@ -1,28 +1,33 @@
+#![feature(ascii_char)]
+
+mod kasa;
 mod net;
 
+use crate::kasa::KasaPowerDetails;
+use async_io::Async;
 use chrono::{DateTime, TimeDelta, TimeZone, Utc};
 use embassy_executor::Spawner;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::once_lock::OnceLock;
 use embassy_sync::pubsub::PubSubChannel;
 use embassy_time::{Duration, Timer};
-use esp_idf_hal::prelude::*;
-use esp_idf_svc::log::EspLogger;
-use esp_idf_svc::sys::link_patches;
-use std::cell::RefCell;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering::Relaxed;
-
 use esp_backtrace as _;
 use esp_idf_hal::gpio::{AnyIOPin, IOPin, Input, InterruptType, Output, Pin, PinDriver, Pull};
 use esp_idf_hal::modem::Modem;
+use esp_idf_hal::prelude::*;
 use esp_idf_svc::eventloop::{EspEventLoop, EspSystemEventLoop, System};
+use esp_idf_svc::log::EspLogger;
 use esp_idf_svc::nvs::{EspDefaultNvsPartition, EspNvsPartition, NvsDefault};
 use esp_idf_svc::sntp;
 use esp_idf_svc::sntp::{EspSntp, SntpConf};
+use esp_idf_svc::sys::link_patches;
 use esp_idf_svc::timer::{EspTaskTimerService, EspTimerService, Task};
 use esp_idf_svc::wifi::{AsyncWifi, EspWifi};
 use esp_println as _;
+use std::cell::RefCell;
+use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering::Relaxed;
 
 static BUTTON_PIN: OnceLock<&mut RefCell<PinDriver<AnyIOPin, Input>>> = OnceLock::new();
 static LED_PIN: OnceLock<&mut RefCell<PinDriver<AnyIOPin, Output>>> = OnceLock::new();
@@ -133,6 +138,7 @@ async fn main(spawner: Spawner) {
     );
 
     let peripherals = Peripherals::take().unwrap();
+
     let sys_loop = EspSystemEventLoop::take().unwrap();
     let timer_service = EspTaskTimerService::new().unwrap();
     let nvs = EspDefaultNvsPartition::take().unwrap();
@@ -148,14 +154,21 @@ async fn main(spawner: Spawner) {
         .await
         .unwrap();
 
+    let kasa_device_addr = env!("KASA_DEVICE_ADDR")
+        .to_socket_addrs()
+        .unwrap()
+        .next()
+        .unwrap();
+
     // Run the asynchronous main function
     spawner.spawn(blinky()).unwrap();
-    spawner.spawn(async_main()).unwrap();
+    // spawner.spawn(async_main()).unwrap();
     spawner.spawn(button_task()).unwrap();
     spawner
         .spawn(net::connect_wifi(&WIFI, &WIFI_CONNECTED))
         .unwrap();
     setup_sntp(sntp_cb).await.unwrap();
+    spawner.spawn(read_kasa_dev(kasa_device_addr)).unwrap();
 }
 
 async fn wait_for_duration_with_interrupt(
@@ -206,7 +219,7 @@ async fn blinky() {
             }
             defmt::info!("Done signalling LED from BUTTON");
         } else {
-            defmt::println!("Looping on LED blinky task");
+            defmt::trace!("Looping on LED blinky task");
             led_pin.borrow_mut().set_high().unwrap();
             if !wait_for_duration_with_interrupt(
                 Duration::from_secs(1),
@@ -264,5 +277,39 @@ async fn async_main() {
     loop {
         defmt::info!("Asynchronous task running...");
         Timer::after(Duration::from_secs(1)).await;
+    }
+}
+
+#[embassy_executor::task]
+async fn read_kasa_dev(addr: SocketAddr) {
+    let _mounted_eventfs = esp_idf_svc::io::vfs::MountedEventfs::mount(5).unwrap();
+    loop {
+        defmt::info!("Connecting to Kasa Device...");
+
+        let mut stream = match Async::<TcpStream>::connect(addr).await {
+            Ok(stream) => stream,
+            Err(e) => {
+                defmt::error!(
+                    "Error connecting to Kasa Device: {:?}",
+                    e.to_string().as_str()
+                );
+                Timer::after(Duration::from_secs(5)).await;
+                continue;
+            }
+        };
+
+        defmt::info!("Sending request to Kasa device...");
+        let result: KasaPowerDetails = match kasa::send_kasa_message(&mut stream).await {
+            Ok(response) => response,
+            Err(e) => {
+                defmt::error!("Error talking to kasa device: {:?}", e.to_string().as_str());
+                Timer::after(Duration::from_secs(5)).await;
+                continue;
+            }
+        };
+
+        defmt::info!("Received message: {:?}", result);
+
+        Timer::after(Duration::from_millis(500)).await;
     }
 }

@@ -11,7 +11,11 @@ name = "bottle-time-rust"
 harness = false # do not use the built in cargo test harness -> resolve rust-analyzer errors
 
 [profile.release]
-opt-level = "s"
+opt-level = "z"  # Optimize for size
+lto = true       # Enable Link Time Optimization
+codegen-units = 1  # Reduce parallel code generation units
+#strip = true     # Automatically strip symbols from the binary
+panic = "abort"  # Remove panic unwinding code
 
 [profile.dev]
 debug = true    # Symbols are nice and they don't increase the size on Flash
@@ -60,6 +64,12 @@ smoltcp = { version = "0.12", default-features = false, features = [
 anyhow = "1.0"
 chrono = "0.4.39"
 
+async-io = "2"
+#async-io-typed = "3"
+futures-lite = { version = "2.6.0", default-features = false, features = ["alloc"] }
+serde = { version = "1", default-features = false, features = ["derive"] }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
+tplink-shome-protocol = "0.1.2"
 
 [build-dependencies]
 embuild = "0.33"
