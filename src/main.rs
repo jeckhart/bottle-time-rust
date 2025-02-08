@@ -15,12 +15,16 @@ use esp_backtrace as _;
 use esp_idf_hal::gpio::{AnyIOPin, IOPin, Input, InterruptType, Output, Pin, PinDriver, Pull};
 use esp_idf_hal::modem::Modem;
 use esp_idf_hal::prelude::*;
+use esp_idf_hal::sys::const_format::formatcp;
 use esp_idf_svc::eventloop::{EspEventLoop, EspSystemEventLoop, System};
 use esp_idf_svc::log::EspLogger;
+use esp_idf_svc::mqtt::client::{
+    EspAsyncMqttClient, EspAsyncMqttConnection, EventPayload, MqttClientConfiguration, QoS,
+};
 use esp_idf_svc::nvs::{EspDefaultNvsPartition, EspNvsPartition, NvsDefault};
 use esp_idf_svc::sntp;
 use esp_idf_svc::sntp::{EspSntp, SntpConf};
-use esp_idf_svc::sys::link_patches;
+use esp_idf_svc::sys::{link_patches, EspError};
 use esp_idf_svc::timer::{EspTaskTimerService, EspTimerService, Task};
 use esp_idf_svc::wifi::{AsyncWifi, EspWifi};
 use esp_println as _;
@@ -36,6 +40,16 @@ static RESTART_LED_SEQUENCE: AtomicBool = AtomicBool::new(false);
 static WIFI_CONNECTED: AtomicBool = AtomicBool::new(false);
 static WIFI: OnceLock<&mut RefCell<AsyncWifi<EspWifi>>> = OnceLock::new();
 static SNTP: OnceLock<&mut RefCell<EspSntp>> = OnceLock::new();
+static MQTT_CLIENT: OnceLock<&mut RefCell<EspAsyncMqttClient>> = OnceLock::new();
+static MQTT_CONN: OnceLock<&mut RefCell<EspAsyncMqttConnection>> = OnceLock::new();
+
+const MQTT_PROTOCOL: &str = env!("MQTT_PROTOCOL");
+const MQTT_URL: &str = env!("MQTT_SERVER");
+const MQTT_PORT: &str = env!("MQTT_PORT");
+const MQTT_USERNAME: &str = env!("MQTT_USERNAME");
+const MQTT_PASSWORD: &str = env!("MQTT_PASSWORD");
+const MQTT_CLIENT_ID: &str = env!("MQTT_CLIENT_ID");
+const MQTT_TOPIC: &str = env!("MQTT_TOPIC");
 
 async fn setup_led_pin(
     led_pin: AnyIOPin,
@@ -122,6 +136,29 @@ fn sntp_cb(duration: std::time::Duration) {
     );
 }
 
+async fn setup_mqtt() -> Result<(), EspError> {
+    // let mqtt = MqttClient::new(MQTT_URL, MQTT_PORT, MQTT_USERNAME, MQTT_PASSWORD, MQTT_CLIENT_ID);
+    // mqtt.connect().unwrap();
+    // mqtt.subscribe(MQTT_TOPIC).unwrap();
+    const URL: &str = formatcp!("{MQTT_PROTOCOL}://{MQTT_URL}:{MQTT_PORT}");
+    let (mqtt_client, mqtt_conn) = EspAsyncMqttClient::new(
+        URL,
+        &MqttClientConfiguration {
+            client_id: Some(MQTT_CLIENT_ID),
+            username: Some(MQTT_USERNAME),
+            password: Some(MQTT_PASSWORD),
+            ..Default::default()
+        },
+    )?;
+
+    let mqtt_client = Box::new(RefCell::new(mqtt_client));
+    let mqtt_conn = Box::new(RefCell::new(mqtt_conn));
+    let _res = MQTT_CLIENT.init(Box::leak(mqtt_client));
+    let _res = MQTT_CONN.init(Box::leak(mqtt_conn));
+
+    Ok(())
+}
+
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     // Necessary for linking patches to the runtime
@@ -168,6 +205,8 @@ async fn main(spawner: Spawner) {
         .spawn(net::connect_wifi(&WIFI, &WIFI_CONNECTED))
         .unwrap();
     setup_sntp(sntp_cb).await.unwrap();
+    setup_mqtt().await.unwrap();
+    spawner.spawn(mqtt_event_loop()).unwrap();
     spawner.spawn(read_kasa_dev(kasa_device_addr)).unwrap();
 }
 
@@ -281,6 +320,38 @@ async fn async_main() {
 }
 
 #[embassy_executor::task]
+#[allow(clippy::await_holding_refcell_ref)]
+async fn mqtt_event_loop() {
+    // let client = MQTT_CLIENT.get().await;
+    let conn = MQTT_CONN.get().await;
+
+    loop {
+        defmt::debug!("Waiting for mqtt event");
+        let mut conn = conn.borrow_mut();
+        let event = conn.next().await.unwrap();
+        // defmt::debug!("Received mqtt event: {:?}", event.payload().to_string().as_str());
+        match event.payload() {
+            EventPayload::Published(publish) => {
+                defmt::debug!("Received mqtt publish event: {:?}", publish);
+            }
+            EventPayload::Disconnected => {
+                defmt::debug!("Received mqtt disconnected event");
+            }
+            EventPayload::Connected(status) => {
+                defmt::debug!("Received mqtt connected event {:?}", status);
+            }
+            _ => {
+                defmt::debug!(
+                    "Received mqtt event: {:?}",
+                    event.payload().to_string().as_str()
+                );
+            }
+        }
+    }
+}
+
+#[embassy_executor::task]
+#[allow(clippy::await_holding_refcell_ref)]
 async fn read_kasa_dev(addr: SocketAddr) {
     let _mounted_eventfs = esp_idf_svc::io::vfs::MountedEventfs::mount(5).unwrap();
     let mut last_response: Option<KasaPowerDetails> = Option::None;
@@ -315,6 +386,17 @@ async fn read_kasa_dev(addr: SocketAddr) {
                 if last != &result {
                     defmt::debug!("Power state changed: {:?}", result);
                     *last = result;
+                    let client = MQTT_CLIENT.get().await;
+                    client
+                        .borrow_mut()
+                        .publish(
+                            MQTT_TOPIC,
+                            QoS::AtMostOnce,
+                            false,
+                            serde_json::to_string(last).unwrap().as_ref(),
+                        )
+                        .await
+                        .unwrap();
                 } else {
                     defmt::debug!("No change in power state");
                 }

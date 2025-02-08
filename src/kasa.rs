@@ -1,6 +1,7 @@
 use async_io::Async;
+use chrono::DateTime;
 use defmt::Format;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::from_slice;
 use std::io::{Error, ErrorKind, Read, Write};
 use std::net::TcpStream;
@@ -69,7 +70,7 @@ struct KasaRealtimeResponse {
     pub total_wh: Option<u64>,
 }
 
-#[derive(Deserialize, Debug, PartialEq)]
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct KasaPowerDetails {
     pub alias: String,
     pub device_id: String,
@@ -77,6 +78,7 @@ pub(crate) struct KasaPowerDetails {
     pub current_ma: Option<u64>,
     pub power_mw: Option<u64>,
     pub total_wh: Option<u64>,
+    pub timestamp: DateTime<chrono::Utc>,
 }
 
 impl From<KasaResponse> for KasaPowerDetails {
@@ -99,6 +101,7 @@ impl From<KasaResponse> for KasaPowerDetails {
             total_wh: power
                 .total_wh
                 .or_else(|| power.total.map(|t| (t / 3600.0) as u64)),
+            timestamp: chrono::Utc::now(),
         }
     }
 }

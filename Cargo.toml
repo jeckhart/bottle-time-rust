@@ -38,7 +38,7 @@ esp-idf-hal = { version = "0.45", features = ["embassy-sync"] }
 esp-println = { version = "0.13", features = ["defmt-espflash", "esp32s3", "log", "colors"] }
 esp-backtrace = { version = "0.15.0", features = ["defmt", "esp32s3", "colors", "exception-handler"] }
 
-chrono = { version = "0.4.39", default-features = false, features = ["alloc", "clock", ] }
+chrono = { version = "0.4.39", default-features = false, features = ["alloc", "clock", "serde"] }
 
 async-io = "2"
 #async-io-typed = "3"
