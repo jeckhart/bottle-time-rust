@@ -4,7 +4,9 @@ mod kasa;
 mod net;
 
 use crate::kasa::KasaPowerDetails;
+use crate::net::WifiLoop;
 use async_io::Async;
+use async_mutex::Mutex;
 use chrono::{DateTime, TimeDelta, TimeZone, Utc};
 use defmt::Format;
 use embassy_executor::Spawner;
@@ -41,8 +43,7 @@ static BUTTON_PIN: OnceLock<&mut RefCell<PinDriver<AnyIOPin, Input>>> = OnceLock
 static LED_PIN: OnceLock<&mut RefCell<PinDriver<AnyIOPin, Output>>> = OnceLock::new();
 static BUTTON_CHANNEL: PubSubChannel<CriticalSectionRawMutex, i64, 1, 2, 1> = PubSubChannel::new();
 static RESTART_LED_SEQUENCE: AtomicBool = AtomicBool::new(false);
-static WIFI_CONNECTED: AtomicBool = AtomicBool::new(false);
-static WIFI: OnceLock<&mut RefCell<AsyncWifi<EspWifi>>> = OnceLock::new();
+static WIFI_LOOP: OnceLock<Mutex<WifiLoop>> = OnceLock::new();
 static SNTP: OnceLock<&mut RefCell<EspSntp>> = OnceLock::new();
 static MQTT_CLIENT: OnceLock<&mut RefCell<EspAsyncMqttClient>> = OnceLock::new();
 static MQTT_CONN: OnceLock<&mut RefCell<EspAsyncMqttConnection>> = OnceLock::new();
@@ -86,7 +87,7 @@ async fn setup_button_pin(
     Ok(())
 }
 
-async fn setup_wifi(
+async fn setup_wifi_loop(
     modem: Modem,
     sys_loop: EspEventLoop<System>,
     nvs: EspNvsPartition<NvsDefault>,
@@ -95,16 +96,12 @@ async fn setup_wifi(
     // Initialize the shared LED pin
     defmt::debug!("Setting up Wifi");
 
-    let wifi = Box::new(RefCell::new(
-        AsyncWifi::wrap(
-            EspWifi::new(modem, sys_loop.clone(), Some(nvs)).unwrap(),
-            sys_loop.clone(),
-            timer_service,
-        )
-        .unwrap(),
-    ));
+    let wifi: EspWifi = EspWifi::new(modem, sys_loop.clone(), Some(nvs)).unwrap();
+    let async_wifi: AsyncWifi<_> = AsyncWifi::wrap(wifi, sys_loop.clone(), timer_service).unwrap();
 
-    let _res = WIFI.init(Box::leak(wifi));
+    let wifi_loop = Mutex::new(WifiLoop::new(async_wifi));
+
+    let _res = WIFI_LOOP.init(wifi_loop);
     defmt::debug!("Done setting up Wifi");
     Ok(())
 }
@@ -191,9 +188,17 @@ async fn main(spawner: Spawner) {
     setup_button_pin(peripherals.pins.gpio4.downgrade(), &BUTTON_PIN)
         .await
         .unwrap();
-    setup_wifi(peripherals.modem, sys_loop.clone(), nvs, timer_service)
+    setup_wifi_loop(peripherals.modem, sys_loop.clone(), nvs, timer_service)
         .await
         .unwrap();
+
+    {
+        let mut wifi_loop = WIFI_LOOP.get().await.lock().await;
+        wifi_loop.configure().await.unwrap();
+        defmt::info!("Waiting for Wifi to connect");
+        wifi_loop.initial_connect().await.unwrap();
+        defmt::info!("Wifi connected, continuing");
+    }
 
     let kasa_device_addr = env!("KASA_DEVICE_ADDR")
         .to_socket_addrs()
@@ -206,7 +211,7 @@ async fn main(spawner: Spawner) {
     // spawner.spawn(async_main()).unwrap();
     spawner.spawn(button_task()).unwrap();
     spawner
-        .spawn(net::connect_wifi(&WIFI, &WIFI_CONNECTED))
+        .spawn(net::wifi_loop(WIFI_LOOP.get().await))
         .unwrap();
     setup_sntp(sntp_cb).await.unwrap();
     setup_mqtt().await.unwrap();

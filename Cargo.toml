@@ -35,6 +35,7 @@ embassy-time = { version = "0.4", features = ["defmt", "generic-queue-8"] }
 
 esp-idf-svc = { version = "0.51", features = ["embassy-time-driver", "embassy-sync"] }
 esp-idf-hal = { version = "0.45", features = ["embassy-sync"] }
+esp-idf-sys = { version = "0.36", features = ["binstart"] }
 esp-println = { version = "0.13", features = ["defmt-espflash", "esp32s3", "log", "colors"] }
 esp-backtrace = { version = "0.15.0", features = ["defmt", "esp32s3", "colors", "exception-handler"] }
 
@@ -42,6 +43,7 @@ chrono = { version = "0.4.39", default-features = false, features = ["alloc", "c
 
 async-io = "2"
 #async-io-typed = "3"
+async-mutex = "1"
 futures-lite = { version = "2.6.0", default-features = false, features = ["alloc"] }
 serde = { version = "1", default-features = false, features = ["derive"] }
 serde_json = { version = "1", default-features = false, features = ["alloc"] }
