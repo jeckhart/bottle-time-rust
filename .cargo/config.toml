@@ -23,3 +23,11 @@ RUST_BACKTRACE="1"
 WIFI_SSID = "YOUR_SSID_HERE"
 WIFI_PASSWORD = "YOUR_PASSWORD_HERE"
 KASA_DEVICE_ADDR = "1.1.1.1:9999"
+
+MQTT_PROTOCOL = "mqtt" # needs to be mqqts for secure connection
+MQTT_SERVER = "io.adafruit.com"
+MQTT_PORT = "1883"
+MQTT_USERNAME = "MQTT_USERNAME" # for adafruit.io this is your adafruit.io username
+MQTT_PASSWORD = "MQTT_PASSOWRD" # for adafruit.io this starts with aio_
+MQTT_CLIENT_ID = "btr-01" # specific client id for this client
+MQTT_TOPIC = "MQTT_USERNAME/feeds/TOPIC_NAME" # full path to topic name

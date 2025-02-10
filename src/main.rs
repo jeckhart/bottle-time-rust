@@ -4,8 +4,11 @@ mod kasa;
 mod net;
 
 use crate::kasa::KasaPowerDetails;
+use crate::net::WifiLoop;
 use async_io::Async;
+use async_mutex::Mutex;
 use chrono::{DateTime, TimeDelta, TimeZone, Utc};
+use defmt::Format;
 use embassy_executor::Spawner;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::once_lock::OnceLock;
@@ -15,16 +18,23 @@ use esp_backtrace as _;
 use esp_idf_hal::gpio::{AnyIOPin, IOPin, Input, InterruptType, Output, Pin, PinDriver, Pull};
 use esp_idf_hal::modem::Modem;
 use esp_idf_hal::prelude::*;
+use esp_idf_hal::sys::const_format::formatcp;
 use esp_idf_svc::eventloop::{EspEventLoop, EspSystemEventLoop, System};
 use esp_idf_svc::log::EspLogger;
+use esp_idf_svc::mqtt::client::{
+    EspAsyncMqttClient, EspAsyncMqttConnection, EventPayload, MqttClientConfiguration, QoS,
+};
 use esp_idf_svc::nvs::{EspDefaultNvsPartition, EspNvsPartition, NvsDefault};
 use esp_idf_svc::sntp;
 use esp_idf_svc::sntp::{EspSntp, SntpConf};
-use esp_idf_svc::sys::link_patches;
+use esp_idf_svc::sys::{link_patches, EspError};
 use esp_idf_svc::timer::{EspTaskTimerService, EspTimerService, Task};
 use esp_idf_svc::wifi::{AsyncWifi, EspWifi};
 use esp_println as _;
+use serde::ser::SerializeStruct;
+use serde::Serialize;
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering::Relaxed;
@@ -33,9 +43,18 @@ static BUTTON_PIN: OnceLock<&mut RefCell<PinDriver<AnyIOPin, Input>>> = OnceLock
 static LED_PIN: OnceLock<&mut RefCell<PinDriver<AnyIOPin, Output>>> = OnceLock::new();
 static BUTTON_CHANNEL: PubSubChannel<CriticalSectionRawMutex, i64, 1, 2, 1> = PubSubChannel::new();
 static RESTART_LED_SEQUENCE: AtomicBool = AtomicBool::new(false);
-static WIFI_CONNECTED: AtomicBool = AtomicBool::new(false);
-static WIFI: OnceLock<&mut RefCell<AsyncWifi<EspWifi>>> = OnceLock::new();
+static WIFI_LOOP: OnceLock<Mutex<WifiLoop>> = OnceLock::new();
 static SNTP: OnceLock<&mut RefCell<EspSntp>> = OnceLock::new();
+static MQTT_CLIENT: OnceLock<&mut RefCell<EspAsyncMqttClient>> = OnceLock::new();
+static MQTT_CONN: OnceLock<&mut RefCell<EspAsyncMqttConnection>> = OnceLock::new();
+
+const MQTT_PROTOCOL: &str = env!("MQTT_PROTOCOL");
+const MQTT_URL: &str = env!("MQTT_SERVER");
+const MQTT_PORT: &str = env!("MQTT_PORT");
+const MQTT_USERNAME: &str = env!("MQTT_USERNAME");
+const MQTT_PASSWORD: &str = env!("MQTT_PASSWORD");
+const MQTT_CLIENT_ID: &str = env!("MQTT_CLIENT_ID");
+const MQTT_TOPIC: &str = env!("MQTT_TOPIC");
 
 async fn setup_led_pin(
     led_pin: AnyIOPin,
@@ -68,7 +87,7 @@ async fn setup_button_pin(
     Ok(())
 }
 
-async fn setup_wifi(
+async fn setup_wifi_loop(
     modem: Modem,
     sys_loop: EspEventLoop<System>,
     nvs: EspNvsPartition<NvsDefault>,
@@ -77,16 +96,12 @@ async fn setup_wifi(
     // Initialize the shared LED pin
     defmt::debug!("Setting up Wifi");
 
-    let wifi = Box::new(RefCell::new(
-        AsyncWifi::wrap(
-            EspWifi::new(modem, sys_loop.clone(), Some(nvs)).unwrap(),
-            sys_loop.clone(),
-            timer_service,
-        )
-        .unwrap(),
-    ));
+    let wifi: EspWifi = EspWifi::new(modem, sys_loop.clone(), Some(nvs)).unwrap();
+    let async_wifi: AsyncWifi<_> = AsyncWifi::wrap(wifi, sys_loop.clone(), timer_service).unwrap();
 
-    let _res = WIFI.init(Box::leak(wifi));
+    let wifi_loop = Mutex::new(WifiLoop::new(async_wifi));
+
+    let _res = WIFI_LOOP.init(wifi_loop);
     defmt::debug!("Done setting up Wifi");
     Ok(())
 }
@@ -122,6 +137,29 @@ fn sntp_cb(duration: std::time::Duration) {
     );
 }
 
+async fn setup_mqtt() -> Result<(), EspError> {
+    // let mqtt = MqttClient::new(MQTT_URL, MQTT_PORT, MQTT_USERNAME, MQTT_PASSWORD, MQTT_CLIENT_ID);
+    // mqtt.connect().unwrap();
+    // mqtt.subscribe(MQTT_TOPIC).unwrap();
+    const URL: &str = formatcp!("{MQTT_PROTOCOL}://{MQTT_URL}:{MQTT_PORT}");
+    let (mqtt_client, mqtt_conn) = EspAsyncMqttClient::new(
+        URL,
+        &MqttClientConfiguration {
+            client_id: Some(MQTT_CLIENT_ID),
+            username: Some(MQTT_USERNAME),
+            password: Some(MQTT_PASSWORD),
+            ..Default::default()
+        },
+    )?;
+
+    let mqtt_client = Box::new(RefCell::new(mqtt_client));
+    let mqtt_conn = Box::new(RefCell::new(mqtt_conn));
+    let _res = MQTT_CLIENT.init(Box::leak(mqtt_client));
+    let _res = MQTT_CONN.init(Box::leak(mqtt_conn));
+
+    Ok(())
+}
+
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     // Necessary for linking patches to the runtime
@@ -150,9 +188,17 @@ async fn main(spawner: Spawner) {
     setup_button_pin(peripherals.pins.gpio4.downgrade(), &BUTTON_PIN)
         .await
         .unwrap();
-    setup_wifi(peripherals.modem, sys_loop.clone(), nvs, timer_service)
+    setup_wifi_loop(peripherals.modem, sys_loop.clone(), nvs, timer_service)
         .await
         .unwrap();
+
+    {
+        let mut wifi_loop = WIFI_LOOP.get().await.lock().await;
+        wifi_loop.configure().await.unwrap();
+        defmt::info!("Waiting for Wifi to connect");
+        wifi_loop.initial_connect().await.unwrap();
+        defmt::info!("Wifi connected, continuing");
+    }
 
     let kasa_device_addr = env!("KASA_DEVICE_ADDR")
         .to_socket_addrs()
@@ -165,9 +211,11 @@ async fn main(spawner: Spawner) {
     // spawner.spawn(async_main()).unwrap();
     spawner.spawn(button_task()).unwrap();
     spawner
-        .spawn(net::connect_wifi(&WIFI, &WIFI_CONNECTED))
+        .spawn(net::wifi_loop(WIFI_LOOP.get().await))
         .unwrap();
     setup_sntp(sntp_cb).await.unwrap();
+    setup_mqtt().await.unwrap();
+    spawner.spawn(mqtt_event_loop()).unwrap();
     spawner.spawn(read_kasa_dev(kasa_device_addr)).unwrap();
 }
 
@@ -281,9 +329,188 @@ async fn async_main() {
 }
 
 #[embassy_executor::task]
+#[allow(clippy::await_holding_refcell_ref)]
+async fn mqtt_event_loop() {
+    // let client = MQTT_CLIENT.get().await;
+    let conn = MQTT_CONN.get().await;
+
+    loop {
+        defmt::debug!("Waiting for mqtt event");
+        let mut conn = conn.borrow_mut();
+        let event = conn.next().await.unwrap();
+        // defmt::debug!("Received mqtt event: {:?}", event.payload().to_string().as_str());
+        match event.payload() {
+            EventPayload::Published(publish) => {
+                defmt::debug!("Received mqtt publish event: {:?}", publish);
+            }
+            EventPayload::Disconnected => {
+                defmt::debug!("Received mqtt disconnected event");
+            }
+            EventPayload::Connected(status) => {
+                defmt::debug!("Received mqtt connected event {:?}", status);
+            }
+            _ => {
+                defmt::debug!(
+                    "Received mqtt event: {:?}",
+                    event.payload().to_string().as_str()
+                );
+            }
+        }
+    }
+}
+
+// Structure that stores a variable number of KasaPowerDetails events and a duration that represents
+// how old an event is before it gets evicted from the structure
+pub(crate) struct KasaPowerCache {
+    pub(crate) cache: VecDeque<KasaPowerDetails>,
+    pub(crate) duration: chrono::Duration,
+}
+
+impl KasaPowerCache {
+    pub(crate) fn new(duration: chrono::Duration) -> Self {
+        Self {
+            cache: VecDeque::new(),
+            duration,
+        }
+    }
+
+    pub(crate) fn insert(&mut self, event: KasaPowerDetails) {
+        self.evict(event.timestamp);
+        self.cache.push_back(event);
+    }
+
+    pub(crate) fn evict(&mut self, since: DateTime<Utc>) {
+        let threshold = since - self.duration;
+        while let Some(event) = self.cache.front() {
+            if event.timestamp >= threshold {
+                break;
+            }
+            self.cache.pop_front();
+        }
+    }
+
+    // Compute the median voltage of the events contained in the cache
+    pub(crate) fn median_and_mean_voltage(&self) -> Option<(u64, f64)> {
+        let voltages: Vec<u64> = self.cache.iter().filter_map(|e| e.voltage_mv).collect();
+        KasaPowerCache::median_and_mean_value(voltages)
+    }
+
+    // Compute the median voltage of the events contained in the cache
+    pub(crate) fn median_and_mean_current(&self) -> Option<(u64, f64)> {
+        let voltages: Vec<u64> = self.cache.iter().filter_map(|e| e.current_ma).collect();
+        KasaPowerCache::median_and_mean_value(voltages)
+    }
+
+    pub(crate) fn median_and_mean_power(&self) -> Option<(u64, f64)> {
+        let voltages: Vec<u64> = self.cache.iter().filter_map(|e| e.power_mw).collect();
+        KasaPowerCache::median_and_mean_value(voltages)
+    }
+
+    fn median_and_mean_value(mut values: Vec<u64>) -> Option<(u64, f64)> {
+        values.sort_unstable();
+        let len = values.len();
+        if len == 0 {
+            return None;
+        }
+        // get the average value from values
+        let mean = values.iter().sum::<u64>() as f64 / values.len() as f64;
+        // get the median value from values
+        let median = if len % 2 == 0 {
+            (values[len / 2] + values[len / 2 - 1]) / 2
+        } else {
+            values[len / 2]
+        };
+        Some((median, mean))
+    }
+}
+
+impl Format for KasaPowerCache {
+    fn format(&self, f: defmt::Formatter) {
+        defmt::write!(
+            f,
+            "alias: {:a} ",
+            self.cache.front().map(|x| x.alias.as_str())
+        );
+        defmt::write!(
+            f,
+            "deviceId: {:a} ",
+            self.cache.front().map(|x| x.device_id.as_str())
+        );
+        let (median_voltage, mean_voltage) = self.median_and_mean_voltage().unwrap_or((0, 0.0));
+        defmt::write!(f, "voltage (median): {=u64} mv ", median_voltage);
+        defmt::write!(f, "voltage (mean): {=f64} mv ", mean_voltage);
+        let (median_current, mean_current) = self.median_and_mean_current().unwrap_or((0, 0.0));
+        defmt::write!(f, "current (median): {=u64} mv ", median_current);
+        defmt::write!(f, "current (mean): {=f64} mv ", mean_current);
+        let (median_power, mean_power) = self.median_and_mean_power().unwrap_or((0, 0.0));
+        defmt::write!(f, "power (median): {=u64} mv ", median_power);
+        defmt::write!(f, "power (mean): {=f64} mv ", mean_power);
+        defmt::write!(
+            f,
+            "total: {=u64} wh",
+            self.cache
+                .back()
+                .map(|x| x.total_wh.unwrap_or(0))
+                .unwrap_or(0)
+        );
+    }
+}
+
+impl Serialize for KasaPowerCache {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::ser::Serializer,
+    {
+        let voltages_mv = &self
+            .cache
+            .iter()
+            .map(|x| x.voltage_mv.unwrap_or(0))
+            .collect::<Vec<u64>>();
+        let currents_ma = &self
+            .cache
+            .iter()
+            .map(|x| x.current_ma.unwrap_or(0))
+            .collect::<Vec<u64>>();
+        let powers_mw = &self
+            .cache
+            .iter()
+            .map(|x| x.power_mw.unwrap_or(0))
+            .collect::<Vec<u64>>();
+        let timestamps = &self
+            .cache
+            .iter()
+            .map(|x| x.timestamp.timestamp())
+            .collect::<Vec<i64>>();
+        let total_wh = self
+            .cache
+            .back()
+            .map(|x| x.total_wh.unwrap_or(0))
+            .unwrap_or(0);
+        let num_readings = self.cache.len();
+        let mut state = serializer.serialize_struct("KasaPowerCache", 8)?;
+        state.serialize_field("alias", &self.cache.front().map(|x| x.alias.as_str()))?;
+        state.serialize_field(
+            "deviceId",
+            &self.cache.front().map(|x| x.device_id.as_str()),
+        )?;
+        state.serialize_field("power_total", &total_wh)?;
+        state.serialize_field("voltages_mv", &voltages_mv)?;
+        state.serialize_field("currents_ma", &currents_ma)?;
+        state.serialize_field("powers_mw", &powers_mw)?;
+        state.serialize_field("timestamps", &timestamps)?;
+        state.serialize_field("num_readings", &num_readings)?;
+        state.end()
+    }
+}
+
+#[embassy_executor::task]
+#[allow(clippy::await_holding_refcell_ref)]
 async fn read_kasa_dev(addr: SocketAddr) {
     let _mounted_eventfs = esp_idf_svc::io::vfs::MountedEventfs::mount(5).unwrap();
     let mut last_response: Option<KasaPowerDetails> = Option::None;
+    let mut cache = KasaPowerCache::new(chrono::Duration::seconds(20));
+    let publish_interval = chrono::Duration::seconds(15);
+    let mut next_publish = chrono::Utc::now();
 
     loop {
         defmt::info!("Connecting to Kasa Device...");
@@ -312,9 +539,30 @@ async fn read_kasa_dev(addr: SocketAddr) {
 
         match last_response.as_mut() {
             Some(last) => {
-                if last != &result {
+                if !last.compare_no_ts(&result) {
                     defmt::debug!("Power state changed: {:?}", result);
-                    *last = result;
+                    *last = result.clone();
+                    cache.insert(result);
+                    if chrono::Utc::now() > next_publish {
+                        let client = MQTT_CLIENT.get().await;
+                        let message: String = serde_json::to_string(&cache).unwrap();
+                        let mut client = client.borrow_mut();
+                        defmt::debug!(
+                            "Sending new power state changed to mqtt: {:?}",
+                            message.as_str()
+                        );
+
+                        let result = client
+                            .publish(MQTT_TOPIC, QoS::AtMostOnce, false, message.as_bytes())
+                            .await
+                            .unwrap();
+                        defmt::debug!(
+                            "Published message: {:?} messageId:{:?}",
+                            message.as_str(),
+                            result
+                        );
+                        next_publish = chrono::Utc::now() + publish_interval;
+                    }
                 } else {
                     defmt::debug!("No change in power state");
                 }
