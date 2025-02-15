@@ -331,14 +331,14 @@ impl Default for NewBottleMessage {
 #[allow(clippy::await_holding_refcell_ref)]
 async fn button_task() {
     let button_pin = BUTTON_PIN.get().await;
-    defmt::println!(
+    defmt::debug!(
         "Setting up button task on pin {:?}",
         button_pin.borrow().pin()
     );
     let publisher = BUTTON_CHANNEL.publisher().unwrap();
 
     loop {
-        defmt::println!("Looping on button task");
+        defmt::trace!("Looping on button task");
 
         // This is the only place we borrow the button pin, so this should be safe to ignore the clippy warning here.
         {
