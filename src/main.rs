@@ -44,6 +44,8 @@ static BUTTON_PIN: OnceLock<&mut RefCell<PinDriver<AnyIOPin, Input>>> = OnceLock
 static LED_PIN: OnceLock<&mut RefCell<PinDriver<AnyIOPin, Output>>> = OnceLock::new();
 static BUTTON_CHANNEL: PubSubChannel<CriticalSectionRawMutex, i64, 1, 2, 1> = PubSubChannel::new();
 static RESTART_LED_SEQUENCE: AtomicBool = AtomicBool::new(false);
+static CURRENT_SEQUENCE: LazyLock<Mutex<RefCell<&BlinkPattern>>> =
+    LazyLock::new(|| Mutex::new(RefCell::new(WIFI_CONNECTING_PATTERN.get())));
 static WIFI_LOOP: OnceLock<Mutex<WifiLoop>> = OnceLock::new();
 static SNTP: OnceLock<&mut RefCell<EspSntp>> = OnceLock::new();
 static MQTT_CLIENT: OnceLock<&mut RefCell<EspAsyncMqttClient>> = OnceLock::new();
@@ -62,6 +64,60 @@ fn fixed_tz_offset(hours: &str) -> FixedOffset {
     let hours = hours.parse::<i32>().unwrap();
     FixedOffset::west_opt(3600 * hours).unwrap()
 }
+
+// Blink patterns are the sequences that the LED on the button flashes
+// Each pattern is a tuple of (on_time, off_time) in milliseconds
+// Once the LED reaches the end of the pattern, it will follow the repeat behavior defined in the struct
+
+#[derive(Debug, Default, Clone)]
+enum BlinkRepeatBehavior {
+    // SolidOn will keep the LED on after the last pattern
+    SolidOn,
+    // SolidOff will keep the LED off after the last pattern
+    #[allow(dead_code)]
+    Stop,
+    // RepeatFromStart will repeat the pattern from the start
+    #[default]
+    FromStart,
+    // LastPattern will repeat only the last pattern
+    #[allow(dead_code)]
+    LastPattern,
+}
+
+#[derive(Debug, Default, Clone)]
+struct BlinkPattern {
+    patterns: Vec<(u64, u64)>,
+    repeat_behavior: BlinkRepeatBehavior,
+}
+
+static WIFI_CONNECTING_PATTERN: LazyLock<BlinkPattern> = LazyLock::new(|| BlinkPattern {
+    patterns: vec![(400, 200), (400, 200), (400, 800)],
+    repeat_behavior: BlinkRepeatBehavior::FromStart,
+});
+
+static WIFI_CONNECTED_PATTERN: LazyLock<BlinkPattern> = LazyLock::new(|| BlinkPattern {
+    patterns: vec![
+        (150, 150),
+        (150, 150),
+        (150, 150),
+        (150, 150),
+        (150, 150),
+        (150, 150),
+    ],
+    repeat_behavior: BlinkRepeatBehavior::SolidOn,
+});
+
+static BUTTON_PRESSED_PATTERN: LazyLock<BlinkPattern> = LazyLock::new(|| BlinkPattern {
+    patterns: vec![
+        (100, 100),
+        (100, 100),
+        (100, 100),
+        (100, 100),
+        (100, 100),
+        (100, 100),
+    ],
+    repeat_behavior: BlinkRepeatBehavior::SolidOn,
+});
 
 async fn setup_led_pin(
     led_pin: AnyIOPin,
@@ -199,12 +255,20 @@ async fn main(spawner: Spawner) {
         .await
         .unwrap();
 
+    spawner.spawn(blink_led_pattern()).unwrap();
+
     {
         let mut wifi_loop = WIFI_LOOP.get().await.lock().await;
         wifi_loop.configure().await.unwrap();
         defmt::info!("Waiting for Wifi to connect");
         wifi_loop.initial_connect().await.unwrap();
         defmt::info!("Wifi connected, continuing");
+        CURRENT_SEQUENCE
+            .get()
+            .lock()
+            .await
+            .replace(WIFI_CONNECTED_PATTERN.get());
+        RESTART_LED_SEQUENCE.store(true, Relaxed);
     }
 
     let kasa_device_addr = env!("KASA_DEVICE_ADDR")
@@ -214,8 +278,6 @@ async fn main(spawner: Spawner) {
         .unwrap();
 
     // Run the asynchronous main function
-    spawner.spawn(blinky()).unwrap();
-    // spawner.spawn(async_main()).unwrap();
     spawner.spawn(button_task()).unwrap();
     spawner
         .spawn(net::wifi_loop(WIFI_LOOP.get().await))
@@ -230,7 +292,7 @@ async fn wait_for_duration_with_interrupt(
     duration: Duration,
     interrupt: &AtomicBool,
     poll_time: Option<Duration>,
-) -> bool {
+) -> Result<bool, ()> {
     let poll_time = poll_time.unwrap_or(Duration::from_millis(100));
 
     let start_time = chrono::Local::now();
@@ -239,61 +301,112 @@ async fn wait_for_duration_with_interrupt(
     while chrono::Local::now() - start_time < td && !interrupt.load(Relaxed) {
         Timer::after(poll_time).await;
     }
-    !interrupt.load(Relaxed)
+    Ok(!interrupt.load(Relaxed))
+}
+
+async fn blink_one_step(
+    led_pin: &&mut RefCell<PinDriver<'_, AnyIOPin, Output>>,
+    on_time: u64,
+    off_time: u64,
+    interrupt_poll_time: Option<Duration>,
+) -> Result<bool, ()> {
+    led_pin.borrow_mut().set_high().unwrap();
+    if !wait_for_duration_with_interrupt(
+        Duration::from_millis(on_time),
+        &RESTART_LED_SEQUENCE,
+        interrupt_poll_time,
+    )
+    .await?
+    {
+        return Ok(true);
+    }
+    led_pin.borrow_mut().set_low().unwrap();
+    if !wait_for_duration_with_interrupt(
+        Duration::from_millis(off_time),
+        &RESTART_LED_SEQUENCE,
+        interrupt_poll_time,
+    )
+    .await?
+    {
+        return Ok(true);
+    };
+    Ok(false)
 }
 
 #[embassy_executor::task]
-async fn blinky() {
+async fn blink_led_pattern() {
     let led_pin = LED_PIN.get().await;
-    defmt::println!(
+    defmt::debug!(
         "Setting up LED blinky task on pin {:?}",
         led_pin.borrow().pin()
     );
 
-    let mut subscriber = BUTTON_CHANNEL.dyn_subscriber().unwrap();
+    const INTERRUPT_POLL_TIME: Option<Duration> = Some(Duration::from_millis(50));
 
     loop {
         RESTART_LED_SEQUENCE.store(false, Relaxed);
-        if let Some(msg) = subscriber.try_next_message() {
-            defmt::info!(
-                "Signal to LED task from BUTTON task found {:?}",
-                msg.clone()
-            );
+        let pattern = CURRENT_SEQUENCE.get().lock().await.borrow().clone();
 
-            // For loop that runs for 5 seconds and blinks the led every 100 ms
-            let start_time = chrono::Local::now();
-            while chrono::Local::now() - start_time < TimeDelta::seconds(5)
-                && !RESTART_LED_SEQUENCE.load(Relaxed)
+        for (on_time, off_time) in pattern.patterns.iter() {
+            if blink_one_step(led_pin, *on_time, *off_time, INTERRUPT_POLL_TIME)
+                .await
+                .unwrap()
             {
-                if led_pin.borrow_mut().is_set_high() {
-                    led_pin.borrow_mut().set_low().unwrap();
-                } else {
-                    led_pin.borrow_mut().set_high().unwrap();
+                break;
+            }
+        }
+        if RESTART_LED_SEQUENCE.load(Relaxed) {
+            continue;
+        }
+
+        match pattern.repeat_behavior {
+            BlinkRepeatBehavior::SolidOn => {
+                defmt::trace!("Pattern complete, moving to solid on");
+                led_pin.borrow_mut().set_high().unwrap();
+                loop {
+                    if !wait_for_duration_with_interrupt(
+                        Duration::from_millis(100),
+                        &RESTART_LED_SEQUENCE,
+                        INTERRUPT_POLL_TIME,
+                    )
+                    .await
+                    .unwrap()
+                    {
+                        break;
+                    }
                 }
-                Timer::after(Duration::from_millis(100)).await;
             }
-            defmt::info!("Done signalling LED from BUTTON");
-        } else {
-            defmt::trace!("Looping on LED blinky task");
-            led_pin.borrow_mut().set_high().unwrap();
-            if !wait_for_duration_with_interrupt(
-                Duration::from_secs(1),
-                &RESTART_LED_SEQUENCE,
-                Some(Duration::from_millis(100)),
-            )
-            .await
-            {
+            BlinkRepeatBehavior::Stop => {
+                defmt::trace!("Pattern complete, moving to solid off");
+                led_pin.borrow_mut().set_low().unwrap();
+                loop {
+                    if !wait_for_duration_with_interrupt(
+                        Duration::from_millis(100),
+                        &RESTART_LED_SEQUENCE,
+                        INTERRUPT_POLL_TIME,
+                    )
+                    .await
+                    .unwrap()
+                    {
+                        break;
+                    }
+                }
+            }
+            BlinkRepeatBehavior::FromStart => {
+                defmt::trace!("Pattern complete, restarting pattern");
                 continue;
             }
-            led_pin.borrow_mut().set_low().unwrap();
-            if !wait_for_duration_with_interrupt(
-                Duration::from_secs(1),
-                &RESTART_LED_SEQUENCE,
-                Some(Duration::from_millis(100)),
-            )
-            .await
-            {
-                continue;
+            BlinkRepeatBehavior::LastPattern => {
+                defmt::trace!("Pattern complete, repeating last pattern");
+                let (on_time, off_time) = pattern.patterns.last().unwrap();
+                loop {
+                    if blink_one_step(led_pin, *on_time, *off_time, INTERRUPT_POLL_TIME)
+                        .await
+                        .unwrap()
+                    {
+                        break;
+                    }
+                }
             }
         }
     }
@@ -365,6 +478,11 @@ async fn button_task() {
         let current_time = chrono::Local::now();
         defmt::println!("Button pressed at {:?}", current_time.to_rfc3339().as_str());
         publisher.publish_immediate(current_time.timestamp_micros());
+        CURRENT_SEQUENCE
+            .get()
+            .lock()
+            .await
+            .replace(BUTTON_PRESSED_PATTERN.get());
         RESTART_LED_SEQUENCE.store(true, std::sync::atomic::Ordering::Relaxed);
         Timer::after(Duration::from_millis(1000)).await;
     }
