@@ -7,10 +7,11 @@ use crate::kasa::KasaPowerDetails;
 use crate::net::WifiLoop;
 use async_io::Async;
 use async_mutex::Mutex;
-use chrono::{DateTime, TimeDelta, TimeZone, Utc};
+use chrono::{DateTime, FixedOffset, TimeDelta, TimeZone, Utc};
 use defmt::Format;
 use embassy_executor::Spawner;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::lazy_lock::LazyLock;
 use embassy_sync::once_lock::OnceLock;
 use embassy_sync::pubsub::PubSubChannel;
 use embassy_time::{Duration, Timer};
@@ -54,7 +55,13 @@ const MQTT_PORT: &str = env!("MQTT_PORT");
 const MQTT_USERNAME: &str = env!("MQTT_USERNAME");
 const MQTT_PASSWORD: &str = env!("MQTT_PASSWORD");
 const MQTT_CLIENT_ID: &str = env!("MQTT_CLIENT_ID");
-const MQTT_TOPIC: &str = env!("MQTT_TOPIC");
+const MQTT_POWER_TOPIC: &str = env!("MQTT_POWER_TOPIC");
+const MQTT_NEW_BOTTLE_TOPIC: &str = env!("MQTT_NEW_BOTTLE_TOPIC");
+static TZ_OFFSET: LazyLock<FixedOffset> = LazyLock::new(|| fixed_tz_offset(env!("TZ_OFFSET")));
+fn fixed_tz_offset(hours: &str) -> FixedOffset {
+    let hours = hours.parse::<i32>().unwrap();
+    FixedOffset::west_opt(3600 * hours).unwrap()
+}
 
 async fn setup_led_pin(
     led_pin: AnyIOPin,
@@ -292,6 +299,34 @@ async fn blinky() {
     }
 }
 
+#[derive(Serialize, Debug, Default)]
+enum NewBottleEventSource {
+    #[default]
+    Button,
+    #[allow(dead_code)]
+    PowerModel,
+}
+
+#[derive(Serialize, Debug)]
+struct NewBottleMessage {
+    event: String,
+    #[serde(with = "chrono::serde::ts_milliseconds")]
+    timestamp: DateTime<Utc>,
+    ounces: u8,
+    event_source: NewBottleEventSource,
+}
+
+impl Default for NewBottleMessage {
+    fn default() -> Self {
+        Self {
+            event: "new-bottle".to_string(),
+            timestamp: Utc::now(),
+            ounces: 6,
+            event_source: NewBottleEventSource::default(),
+        }
+    }
+}
+
 #[embassy_executor::task]
 #[allow(clippy::await_holding_refcell_ref)]
 async fn button_task() {
@@ -309,6 +344,22 @@ async fn button_task() {
         {
             let mut button = button_pin.borrow_mut();
             button.wait_for_rising_edge().await.unwrap();
+        }
+
+        {
+            let client = MQTT_CLIENT.get().await;
+            let mut client = client.borrow_mut();
+            let event = NewBottleMessage::default();
+            let message = serde_json::to_string(&event).unwrap();
+            let _result = client
+                .publish(
+                    MQTT_NEW_BOTTLE_TOPIC,
+                    QoS::AtMostOnce,
+                    false,
+                    message.as_bytes(),
+                )
+                .await
+                .unwrap();
         }
 
         let current_time = chrono::Local::now();
@@ -361,12 +412,12 @@ async fn mqtt_event_loop() {
 
 // Structure that stores a variable number of KasaPowerDetails events and a duration that represents
 // how old an event is before it gets evicted from the structure
-pub(crate) struct KasaPowerCache {
-    pub(crate) cache: VecDeque<KasaPowerDetails>,
+pub(crate) struct KasaPowerCache<Tz: TimeZone> {
+    pub(crate) cache: VecDeque<KasaPowerDetails<Tz>>,
     pub(crate) duration: chrono::Duration,
 }
 
-impl KasaPowerCache {
+impl<Tz: TimeZone> KasaPowerCache<Tz> {
     pub(crate) fn new(duration: chrono::Duration) -> Self {
         Self {
             cache: VecDeque::new(),
@@ -374,12 +425,12 @@ impl KasaPowerCache {
         }
     }
 
-    pub(crate) fn insert(&mut self, event: KasaPowerDetails) {
-        self.evict(event.timestamp);
+    pub(crate) fn insert(&mut self, event: KasaPowerDetails<Tz>) {
+        self.evict(event.timestamp.clone());
         self.cache.push_back(event);
     }
 
-    pub(crate) fn evict(&mut self, since: DateTime<Utc>) {
+    pub(crate) fn evict(&mut self, since: DateTime<Tz>) {
         let threshold = since - self.duration;
         while let Some(event) = self.cache.front() {
             if event.timestamp >= threshold {
@@ -392,18 +443,18 @@ impl KasaPowerCache {
     // Compute the median voltage of the events contained in the cache
     pub(crate) fn median_and_mean_voltage(&self) -> Option<(u64, f64)> {
         let voltages: Vec<u64> = self.cache.iter().filter_map(|e| e.voltage_mv).collect();
-        KasaPowerCache::median_and_mean_value(voltages)
+        KasaPowerCache::<Tz>::median_and_mean_value(voltages)
     }
 
     // Compute the median voltage of the events contained in the cache
     pub(crate) fn median_and_mean_current(&self) -> Option<(u64, f64)> {
         let voltages: Vec<u64> = self.cache.iter().filter_map(|e| e.current_ma).collect();
-        KasaPowerCache::median_and_mean_value(voltages)
+        KasaPowerCache::<Tz>::median_and_mean_value(voltages)
     }
 
     pub(crate) fn median_and_mean_power(&self) -> Option<(u64, f64)> {
         let voltages: Vec<u64> = self.cache.iter().filter_map(|e| e.power_mw).collect();
-        KasaPowerCache::median_and_mean_value(voltages)
+        KasaPowerCache::<Tz>::median_and_mean_value(voltages)
     }
 
     fn median_and_mean_value(mut values: Vec<u64>) -> Option<(u64, f64)> {
@@ -424,7 +475,7 @@ impl KasaPowerCache {
     }
 }
 
-impl Format for KasaPowerCache {
+impl Format for KasaPowerCache<FixedOffset> {
     fn format(&self, f: defmt::Formatter) {
         defmt::write!(
             f,
@@ -456,7 +507,7 @@ impl Format for KasaPowerCache {
     }
 }
 
-impl Serialize for KasaPowerCache {
+impl Serialize for KasaPowerCache<FixedOffset> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::ser::Serializer,
@@ -507,7 +558,7 @@ impl Serialize for KasaPowerCache {
 #[allow(clippy::await_holding_refcell_ref)]
 async fn read_kasa_dev(addr: SocketAddr) {
     let _mounted_eventfs = esp_idf_svc::io::vfs::MountedEventfs::mount(5).unwrap();
-    let mut last_response: Option<KasaPowerDetails> = Option::None;
+    let mut last_response: Option<KasaPowerDetails<FixedOffset>> = Option::None;
     let mut cache = KasaPowerCache::new(chrono::Duration::seconds(20));
     let publish_interval = chrono::Duration::seconds(15);
     let mut next_publish = chrono::Utc::now();
@@ -528,7 +579,8 @@ async fn read_kasa_dev(addr: SocketAddr) {
         };
 
         defmt::info!("Sending request to Kasa device...");
-        let result: KasaPowerDetails = match kasa::send_kasa_message(&mut stream).await {
+        let result: KasaPowerDetails<FixedOffset> = match kasa::send_kasa_message(&mut stream).await
+        {
             Ok(response) => response,
             Err(e) => {
                 defmt::error!("Error talking to kasa device: {:?}", e.to_string().as_str());
@@ -553,7 +605,7 @@ async fn read_kasa_dev(addr: SocketAddr) {
                         );
 
                         let result = client
-                            .publish(MQTT_TOPIC, QoS::AtMostOnce, false, message.as_bytes())
+                            .publish(MQTT_POWER_TOPIC, QoS::AtMostOnce, false, message.as_bytes())
                             .await
                             .unwrap();
                         defmt::debug!(
