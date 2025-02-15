@@ -55,7 +55,8 @@ const MQTT_PORT: &str = env!("MQTT_PORT");
 const MQTT_USERNAME: &str = env!("MQTT_USERNAME");
 const MQTT_PASSWORD: &str = env!("MQTT_PASSWORD");
 const MQTT_CLIENT_ID: &str = env!("MQTT_CLIENT_ID");
-const MQTT_TOPIC: &str = env!("MQTT_TOPIC");
+const MQTT_POWER_TOPIC: &str = env!("MQTT_POWER_TOPIC");
+const MQTT_NEW_BOTTLE_TOPIC: &str = env!("MQTT_NEW_BOTTLE_TOPIC");
 static TZ_OFFSET: LazyLock<FixedOffset> = LazyLock::new(|| fixed_tz_offset(env!("TZ_OFFSET")));
 fn fixed_tz_offset(hours: &str) -> FixedOffset {
     let hours = hours.parse::<i32>().unwrap();
@@ -298,6 +299,34 @@ async fn blinky() {
     }
 }
 
+#[derive(Serialize, Debug, Default)]
+enum NewBottleEventSource {
+    #[default]
+    Button,
+    #[allow(dead_code)]
+    PowerModel,
+}
+
+#[derive(Serialize, Debug)]
+struct NewBottleMessage {
+    event: String,
+    #[serde(with = "chrono::serde::ts_milliseconds")]
+    timestamp: DateTime<Utc>,
+    ounces: u8,
+    event_source: NewBottleEventSource,
+}
+
+impl Default for NewBottleMessage {
+    fn default() -> Self {
+        Self {
+            event: "new-bottle".to_string(),
+            timestamp: Utc::now(),
+            ounces: 6,
+            event_source: NewBottleEventSource::default(),
+        }
+    }
+}
+
 #[embassy_executor::task]
 #[allow(clippy::await_holding_refcell_ref)]
 async fn button_task() {
@@ -315,6 +344,22 @@ async fn button_task() {
         {
             let mut button = button_pin.borrow_mut();
             button.wait_for_rising_edge().await.unwrap();
+        }
+
+        {
+            let client = MQTT_CLIENT.get().await;
+            let mut client = client.borrow_mut();
+            let event = NewBottleMessage::default();
+            let message = serde_json::to_string(&event).unwrap();
+            let _result = client
+                .publish(
+                    MQTT_NEW_BOTTLE_TOPIC,
+                    QoS::AtMostOnce,
+                    false,
+                    message.as_bytes(),
+                )
+                .await
+                .unwrap();
         }
 
         let current_time = chrono::Local::now();
@@ -560,7 +605,7 @@ async fn read_kasa_dev(addr: SocketAddr) {
                         );
 
                         let result = client
-                            .publish(MQTT_TOPIC, QoS::AtMostOnce, false, message.as_bytes())
+                            .publish(MQTT_POWER_TOPIC, QoS::AtMostOnce, false, message.as_bytes())
                             .await
                             .unwrap();
                         defmt::debug!(

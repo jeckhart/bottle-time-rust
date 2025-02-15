@@ -31,4 +31,5 @@ MQTT_PORT = "1883"
 MQTT_USERNAME = "MQTT_USERNAME" # for adafruit.io this is your adafruit.io username
 MQTT_PASSWORD = "MQTT_PASSOWRD" # for adafruit.io this starts with aio_
 MQTT_CLIENT_ID = "btr-01" # specific client id for this client
-MQTT_TOPIC = "MQTT_USERNAME/feeds/TOPIC_NAME" # full path to topic name
+MQTT_POWER_TOPIC = "MQTT_USERNAME/feeds/POWER_TOPIC_NAME" # full path to topic name
+MQTT_NEW_BOTTLE_TOPIC = "MQTT_USERNAME/feeds/NEW_BOTTLE_TOPIC_NAME" # full path to topic name
