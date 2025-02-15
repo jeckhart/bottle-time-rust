@@ -1,5 +1,6 @@
+use crate::TZ_OFFSET;
 use async_io::Async;
-use chrono::DateTime;
+use chrono::{DateTime, FixedOffset, TimeZone};
 use defmt::Format;
 use serde::{Deserialize, Serialize};
 use serde_json::from_slice;
@@ -11,19 +12,19 @@ const KASA_REQUEST: &[u8] =
     r#"{"system":{"get_sysinfo":{}},"emeter":{"get_realtime":{}}}"#.as_bytes();
 
 #[derive(Deserialize, Debug, Format)]
-struct KasaResponse {
+pub(crate) struct KasaResponse {
     pub system: KasaSystemResponse,
     #[serde(rename = "emeter")]
     pub power: KasaPowerResponse,
 }
 
 #[derive(Deserialize, Debug, Format)]
-struct KasaSystemResponse {
+pub(crate) struct KasaSystemResponse {
     pub get_sysinfo: KasaSysinfoResponse,
 }
 
 #[derive(Deserialize, Debug)]
-struct KasaSysinfoResponse {
+pub(crate) struct KasaSysinfoResponse {
     pub alias: String,
     #[serde(rename = "deviceId")]
     pub device_id: String,
@@ -51,12 +52,12 @@ impl Format for KasaSysinfoResponse {
 }
 
 #[derive(Deserialize, Debug, Format)]
-struct KasaPowerResponse {
+pub(crate) struct KasaPowerResponse {
     pub get_realtime: Option<KasaRealtimeResponse>,
 }
 
 #[derive(Deserialize, Debug, Format)]
-struct KasaRealtimeResponse {
+pub(crate) struct KasaRealtimeResponse {
     // v1 hardware returns f64 values in base units
     pub current: Option<f64>,
     pub voltage: Option<f64>,
@@ -70,20 +71,20 @@ struct KasaRealtimeResponse {
     pub total_wh: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub(crate) struct KasaPowerDetails {
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub(crate) struct KasaPowerDetails<Tz: TimeZone> {
     pub alias: String,
     pub device_id: String,
     pub voltage_mv: Option<u64>,
     pub current_ma: Option<u64>,
     pub power_mw: Option<u64>,
     pub total_wh: Option<u64>,
-    pub timestamp: DateTime<chrono::Utc>,
+    pub timestamp: DateTime<Tz>,
 }
 
-impl KasaPowerDetails {
+impl<Tz: TimeZone> KasaPowerDetails<Tz> {
     // Compare this value to another value on all fields except the timestamp
-    pub fn compare_no_ts(&self, other: &KasaPowerDetails) -> bool {
+    pub fn compare_no_ts(&self, other: &KasaPowerDetails<Tz>) -> bool {
         self.alias == other.alias
             && self.device_id == other.device_id
             && self.voltage_mv == other.voltage_mv
@@ -93,7 +94,7 @@ impl KasaPowerDetails {
     }
 }
 
-impl From<KasaResponse> for KasaPowerDetails {
+impl From<KasaResponse> for KasaPowerDetails<FixedOffset> {
     fn from(response: KasaResponse) -> Self {
         let system = response.system.get_sysinfo;
         let power = response.power.get_realtime.unwrap();
@@ -113,12 +114,12 @@ impl From<KasaResponse> for KasaPowerDetails {
             total_wh: power
                 .total_wh
                 .or_else(|| power.total.map(|t| (t / 3600.0) as u64)),
-            timestamp: chrono::Utc::now(),
+            timestamp: chrono::Utc::now().with_timezone(TZ_OFFSET.get()),
         }
     }
 }
 
-impl Format for KasaPowerDetails {
+impl<Tz: TimeZone> Format for KasaPowerDetails<Tz> {
     fn format(&self, f: defmt::Formatter) {
         defmt::write!(f, "alias: {:a} ", self.alias.as_str());
         defmt::write!(f, "deviceId: {:a} ", self.device_id.as_str());
@@ -129,9 +130,12 @@ impl Format for KasaPowerDetails {
     }
 }
 
-pub(crate) async fn send_kasa_message(
+pub(crate) async fn send_kasa_message<Tz: TimeZone>(
     stream: &mut Async<TcpStream>,
-) -> Result<KasaPowerDetails, Error> {
+) -> Result<KasaPowerDetails<Tz>, Error>
+where
+    KasaPowerDetails<Tz>: From<KasaResponse>,
+{
     let buf = encrypt(KASA_REQUEST);
     let len = &(buf.len() as u32).to_be_bytes();
 

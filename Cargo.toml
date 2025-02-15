@@ -47,6 +47,7 @@ async-mutex = "1"
 futures-lite = { version = "2.6.0", default-features = false, features = ["alloc"] }
 serde = { version = "1", default-features = false, features = ["derive"] }
 serde_json = { version = "1", default-features = false, features = ["alloc"] }
+serde_with = { version = "3", default-features = false, features = ["alloc", "chrono_0_4", ] }
 tplink-shome-protocol = "0.1.2"
 
 [build-dependencies]
