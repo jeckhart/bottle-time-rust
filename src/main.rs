@@ -15,11 +15,15 @@ use embassy_sync::lazy_lock::LazyLock;
 use embassy_sync::once_lock::OnceLock;
 use embassy_sync::pubsub::PubSubChannel;
 use embassy_time::{Duration, Timer};
+use enumset::enum_set;
 use esp_backtrace as _;
+use esp_idf_hal::cpu::Core;
 use esp_idf_hal::gpio::{AnyIOPin, IOPin, Input, InterruptType, Output, Pin, PinDriver, Pull};
 use esp_idf_hal::modem::Modem;
 use esp_idf_hal::prelude::*;
 use esp_idf_hal::sys::const_format::formatcp;
+use esp_idf_hal::task::watchdog;
+use esp_idf_hal::task::watchdog::{TWDTConfig, WatchdogSubscription};
 use esp_idf_svc::eventloop::{EspEventLoop, EspSystemEventLoop, System};
 use esp_idf_svc::log::EspLogger;
 use esp_idf_svc::mqtt::client::{
@@ -50,6 +54,7 @@ static WIFI_LOOP: OnceLock<Mutex<WifiLoop>> = OnceLock::new();
 static SNTP: OnceLock<&mut RefCell<EspSntp>> = OnceLock::new();
 static MQTT_CLIENT: OnceLock<&mut RefCell<EspAsyncMqttClient>> = OnceLock::new();
 static MQTT_CONN: OnceLock<&mut RefCell<EspAsyncMqttConnection>> = OnceLock::new();
+static WATCHDOG: OnceLock<&mut RefCell<WatchdogSubscription>> = OnceLock::new();
 
 const MQTT_PROTOCOL: &str = env!("MQTT_PROTOCOL");
 const MQTT_URL: &str = env!("MQTT_SERVER");
@@ -223,6 +228,26 @@ async fn setup_mqtt() -> Result<(), EspError> {
     Ok(())
 }
 
+/// Setup the ESP32 watchdog timer to ensure that our system is running. Restart the system if the
+/// watchdog timer expires.
+async fn setup_watchdog(timeout: Duration) -> Result<(), EspError> {
+    let peripherals = Peripherals::take().unwrap();
+
+    let config = TWDTConfig {
+        duration: core::time::Duration::from(timeout),
+        panic_on_trigger: true,
+        subscribed_idle_tasks: enum_set!(Core::Core0),
+    };
+    let driver = Box::new(watchdog::TWDTDriver::new(peripherals.twdt, &config)?);
+
+    let driver_ref = Box::leak(driver);
+    let watchdog = driver_ref.watch_current_task()?;
+    let watchdog = Box::new(RefCell::new(watchdog));
+    let _res = WATCHDOG.init(Box::leak(watchdog));
+
+    Ok(())
+}
+
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     // Necessary for linking patches to the runtime
@@ -285,6 +310,8 @@ async fn main(spawner: Spawner) {
     setup_sntp(sntp_cb).await.unwrap();
     setup_mqtt().await.unwrap();
     spawner.spawn(mqtt_event_loop()).unwrap();
+
+    setup_watchdog(Duration::from_secs(900)).await.unwrap();
     spawner.spawn(read_kasa_dev(kasa_device_addr)).unwrap();
 }
 
@@ -648,7 +675,7 @@ impl Serialize for KasaPowerCache<FixedOffset> {
         let timestamps = &self
             .cache
             .iter()
-            .map(|x| x.timestamp.timestamp())
+            .map(|x| x.timestamp.timestamp_millis())
             .collect::<Vec<i64>>();
         let total_wh = self
             .cache
@@ -732,6 +759,9 @@ async fn read_kasa_dev(addr: SocketAddr) {
                             result
                         );
                         next_publish = chrono::Utc::now() + publish_interval;
+                        let wd = WATCHDOG.get().await;
+                        let mut wd = wd.borrow_mut();
+                        wd.feed().unwrap();
                     }
                 } else {
                     defmt::debug!("No change in power state");
